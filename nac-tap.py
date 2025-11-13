@@ -3153,9 +3153,9 @@ class BridgeManager:
                 if is_mgmt_interface(name):
                     role = 'Management (WiFi)'
                 elif self.interfaces and name in self.interfaces:
-                        idx = self.interfaces.index(name)
-                        role = f'Tap Port ({"Client" if idx == 0 else "Switch"})'
-                    elif name == CONFIG['BRIDGE_NAME']:
+                    idx = self.interfaces.index(name)
+                    role = f'Tap Port ({"Client" if idx == 0 else "Switch"})'
+                elif name == CONFIG['BRIDGE_NAME']:
                     role = 'Transparent Bridge'
                 elif name.startswith(('eth', 'enp', 'lan', 'end')):
                     role = 'Ethernet'
