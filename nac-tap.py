@@ -1609,17 +1609,55 @@ class WiFiManager:
                 run_cmd(['iptables', '-I', 'FORWARD', '1', '-i', wlan_interface, '-o', bridge_name, '-m', 'state', '--state', 'ESTABLISHED,RELATED', '-j', 'ACCEPT'])
                 log(f"Return forwarding rule added: {wlan_interface} -> {bridge_name}")
             
+            # Allow DNS traffic (port 53 UDP/TCP) through OUTPUT chain for appliance itself
+            # This ensures DNS queries from the appliance go out WLAN interface
+            log("Adding DNS forwarding rules in iptables OUTPUT chain...", 'INFO')
+            
+            # Allow DNS outbound on WLAN interface
+            result = run_cmd(['iptables', '-C', 'OUTPUT', '-o', wlan_interface, '-p', 'udp', '--dport', '53', '-j', 'ACCEPT'], check=False)
+            if result and result.returncode != 0:
+                run_cmd(['iptables', '-I', 'OUTPUT', '1', '-o', wlan_interface, '-p', 'udp', '--dport', '53', '-j', 'ACCEPT'])
+                log("DNS UDP output rule added for WLAN", 'INFO')
+            
+            result = run_cmd(['iptables', '-C', 'OUTPUT', '-o', wlan_interface, '-p', 'tcp', '--dport', '53', '-j', 'ACCEPT'], check=False)
+            if result and result.returncode != 0:
+                run_cmd(['iptables', '-I', 'OUTPUT', '1', '-o', wlan_interface, '-p', 'tcp', '--dport', '53', '-j', 'ACCEPT'])
+                log("DNS TCP output rule added for WLAN", 'INFO')
+            
+            # Allow HTTP/HTTPS outbound on WLAN interface
+            result = run_cmd(['iptables', '-C', 'OUTPUT', '-o', wlan_interface, '-p', 'tcp', '--dport', '80', '-j', 'ACCEPT'], check=False)
+            if result and result.returncode != 0:
+                run_cmd(['iptables', '-I', 'OUTPUT', '1', '-o', wlan_interface, '-p', 'tcp', '--dport', '80', '-j', 'ACCEPT'])
+            
+            result = run_cmd(['iptables', '-C', 'OUTPUT', '-o', wlan_interface, '-p', 'tcp', '--dport', '443', '-j', 'ACCEPT'], check=False)
+            if result and result.returncode != 0:
+                run_cmd(['iptables', '-I', 'OUTPUT', '1', '-o', wlan_interface, '-p', 'tcp', '--dport', '443', '-j', 'ACCEPT'])
+            
             # Ensure DNS traffic goes through WLAN
             if dns_servers:
+                log(f"Verifying DNS servers routing: {dns_servers}", 'INFO')
                 for dns in dns_servers:
                     # Ensure route to DNS server via WLAN
-                    if not re.match(r'^(10|172\.(1[6-9]|2[0-9]|3[01])|192\.168|169\.254)\.', dns):
-                        # Public DNS - should use default route, but verify
-                        result = run_cmd(['ip', 'route', 'get', dns])
-                        if result:
-                            if wlan_interface not in result.stdout:
-                                log(f"DNS server {dns} not routed via WLAN, ensuring route...", 'WARNING')
-                                # Add specific route if needed (though default should handle it)
+                    result = run_cmd(['ip', 'route', 'get', dns])
+                    if result:
+                        log(f"Route to DNS {dns}: {result.stdout.strip()}", 'INFO')
+                        if wlan_interface not in result.stdout:
+                            log(f"DNS server {dns} not routed via WLAN, route: {result.stdout.strip()}", 'WARNING')
+                            # If it's a private IP (gateway), add specific route
+                            if re.match(r'^(10|172\.(1[6-9]|2[0-9]|3[01])|192\.168|169\.254)\.', dns):
+                                log(f"Adding route to private DNS server {dns} via {wlan_gateway}", 'INFO')
+                                run_cmd(['ip', 'route', 'add', dns, 'via', wlan_gateway, 'dev', wlan_interface], check=False)
+            
+            # Flush DNS cache if systemd-resolved is active
+            result = run_cmd(['systemctl', 'is-active', 'systemd-resolved'], check=False)
+            if result and result.returncode == 0:
+                log("Flushing DNS cache via systemd-resolved...", 'INFO')
+                run_cmd(['resolvectl', 'flush-caches'], check=False)
+            
+            # Restart systemd-resolved to pick up new DNS config
+            result = run_cmd(['systemctl', 'restart', 'systemd-resolved'], check=False)
+            if result and result.returncode == 0:
+                log("Restarted systemd-resolved", 'INFO')
             
             # Verify DNS configuration
             log("Verifying DNS configuration...", 'INFO')
@@ -1630,6 +1668,24 @@ class WiFiManager:
             result = run_cmd(['ip', 'route', 'show', 'default'])
             if result:
                 log(f"Default route: {result.stdout.strip()}", 'INFO')
+            
+            # Test DNS connectivity immediately
+            log("Testing DNS connectivity...", 'INFO')
+            if dns_servers:
+                test_dns = dns_servers[0]
+                result = run_cmd(['dig', '@' + test_dns, 'google.com', '+short', '+timeout=3'], timeout=5)
+                if result and result.returncode == 0 and result.stdout.strip():
+                    log(f"DNS test successful! Querying {test_dns} for google.com returned: {result.stdout.strip()[:100]}", 'SUCCESS')
+                else:
+                    log(f"DNS test failed for {test_dns}. Trying ping test...", 'WARNING')
+                    # Try ping to DNS server
+                    result = run_cmd(['ping', '-c', '1', '-W', '2', test_dns], timeout=3)
+                    if result and result.returncode == 0:
+                        log(f"DNS server {test_dns} is reachable via ping", 'INFO')
+                    else:
+                        log(f"DNS server {test_dns} is NOT reachable", 'ERROR')
+            else:
+                log("No DNS servers configured for testing", 'WARNING')
             
             log(f"Internet routing configured for {wlan_interface}", 'SUCCESS')
             return True
@@ -1644,6 +1700,12 @@ class WiFiManager:
         """Cleanup routing rules for WLAN interface"""
         try:
             log(f"Cleaning up routing for {wlan_interface}...")
+            
+            # Remove OUTPUT chain rules
+            run_cmd(['iptables', '-D', 'OUTPUT', '-o', wlan_interface, '-p', 'udp', '--dport', '53', '-j', 'ACCEPT'], check=False)
+            run_cmd(['iptables', '-D', 'OUTPUT', '-o', wlan_interface, '-p', 'tcp', '--dport', '53', '-j', 'ACCEPT'], check=False)
+            run_cmd(['iptables', '-D', 'OUTPUT', '-o', wlan_interface, '-p', 'tcp', '--dport', '80', '-j', 'ACCEPT'], check=False)
+            run_cmd(['iptables', '-D', 'OUTPUT', '-o', wlan_interface, '-p', 'tcp', '--dport', '443', '-j', 'ACCEPT'], check=False)
             
             # Remove NAT rules
             run_cmd(['iptables', '-t', 'nat', '-D', 'POSTROUTING', '-o', wlan_interface, '-j', 'MASQUERADE'], check=False)
@@ -1691,26 +1753,81 @@ class WiFiManager:
         ping_time = None
         dns_server = None
         http_status = None
+        dns_error = None
+        
+        log("Starting internet connectivity test...", 'INFO')
         
         # Test ping with timing
+        log("Testing ping to 8.8.8.8...", 'INFO')
         result = run_cmd(['ping', '-c', '3', '-W', '3', '8.8.8.8'], timeout=10)
         if result and result.returncode == 0:
             ping_ok = True
+            log("Ping test: PASS", 'SUCCESS')
             # Extract average time
             time_match = re.search(r'min/avg/max.*?/([\d.]+)/', result.stdout)
             if time_match:
                 ping_time = float(time_match.group(1))
+                log(f"Average ping time: {ping_time} ms", 'INFO')
+        else:
+            log("Ping test: FAIL", 'ERROR')
+            if result:
+                log(f"Ping error: {result.stderr[:200] if result.stderr else result.stdout[:200]}", 'ERROR')
         
-        # Test DNS
-        result = run_cmd(['nslookup', '-timeout=3', 'google.com'], timeout=6)
-        if result and result.returncode == 0:
+        # Test DNS - try multiple methods
+        log("Testing DNS resolution...", 'INFO')
+        
+        # Try dig first (more reliable)
+        result = run_cmd(['dig', 'google.com', '+short', '+timeout=3'], timeout=6)
+        if result and result.returncode == 0 and result.stdout.strip():
             dns_ok = True
-            # Extract DNS server used
-            server_match = re.search(r'Server:\s*(\S+)', result.stdout)
-            if server_match:
-                dns_server = server_match.group(1)
+            resolved_ip = result.stdout.strip().split('\n')[0]
+            log(f"DNS test (dig): PASS - google.com resolved to {resolved_ip}", 'SUCCESS')
+            
+            # Try to get DNS server from dig output
+            result2 = run_cmd(['dig', 'google.com', '+stats'], timeout=6)
+            if result2:
+                server_match = re.search(r';; SERVER: ([\d.]+)', result2.stdout)
+                if server_match:
+                    dns_server = server_match.group(1)
+        else:
+            log("DNS test (dig): FAIL, trying nslookup...", 'WARNING')
+            # Fallback to nslookup
+            result = run_cmd(['nslookup', '-timeout=3', 'google.com'], timeout=6)
+            if result and result.returncode == 0:
+                # Check if we got a valid response
+                if 'Address:' in result.stdout or 'Name:' in result.stdout:
+                    dns_ok = True
+                    log("DNS test (nslookup): PASS", 'SUCCESS')
+                    # Extract DNS server used
+                    server_match = re.search(r'Server:\s*(\S+)', result.stdout)
+                    if server_match:
+                        dns_server = server_match.group(1)
+                else:
+                    dns_error = "No valid DNS response"
+                    log(f"DNS test (nslookup): FAIL - {dns_error}", 'ERROR')
+            else:
+                dns_error = result.stderr if result and result.stderr else "DNS query failed"
+                log(f"DNS test (nslookup): FAIL - {dns_error}", 'ERROR')
+        
+        if not dns_ok:
+            # Try testing with specific DNS server (8.8.8.8)
+            log("Trying DNS test with 8.8.8.8 directly...", 'INFO')
+            result = run_cmd(['dig', '@8.8.8.8', 'google.com', '+short', '+timeout=3'], timeout=6)
+            if result and result.returncode == 0 and result.stdout.strip():
+                dns_ok = True
+                dns_server = '8.8.8.8'
+                log("DNS test with 8.8.8.8: PASS", 'SUCCESS')
+            else:
+                log("DNS test with 8.8.8.8: FAIL", 'ERROR')
+                # Check if we can reach 8.8.8.8 on port 53
+                result = run_cmd(['nc', '-zv', '-w', '2', '8.8.8.8', '53'], timeout=3, check=False)
+                if result and result.returncode == 0:
+                    log("Port 53 (DNS) is reachable on 8.8.8.8", 'INFO')
+                else:
+                    log("Port 53 (DNS) is NOT reachable on 8.8.8.8 - check firewall/routing", 'ERROR')
         
         # Test HTTP connectivity
+        log("Testing HTTP connectivity...", 'INFO')
         try:
             import urllib.request
             req = urllib.request.Request('http://www.google.com', timeout=5)
@@ -1718,17 +1835,23 @@ class WiFiManager:
                 if response.status == 200:
                     http_ok = True
                     http_status = response.status
-        except:
+                    log(f"HTTP test: PASS - Status {http_status}", 'SUCCESS')
+        except Exception as e:
             http_ok = False
+            log(f"HTTP test: FAIL - {str(e)[:200]}", 'ERROR')
         
         connected = ping_ok and dns_ok
         self.internet_available = connected
+        
+        log(f"Internet connectivity test complete: Ping={ping_ok}, DNS={dns_ok}, HTTP={http_ok}, Overall={connected}", 
+            'SUCCESS' if connected else 'ERROR')
         
         return {
             'ping': ping_ok,
             'ping_time': ping_time,
             'dns': dns_ok,
             'dns_server': dns_server,
+            'dns_error': dns_error,
             'http': http_ok,
             'http_status': http_status,
             'connected': connected,
@@ -3030,9 +3153,9 @@ class BridgeManager:
                 if is_mgmt_interface(name):
                     role = 'Management (WiFi)'
                 elif self.interfaces and name in self.interfaces:
-                    idx = self.interfaces.index(name)
-                    role = f'Tap Port ({"Client" if idx == 0 else "Switch"})'
-                elif name == CONFIG['BRIDGE_NAME']:
+                        idx = self.interfaces.index(name)
+                        role = f'Tap Port ({"Client" if idx == 0 else "Switch"})'
+                    elif name == CONFIG['BRIDGE_NAME']:
                     role = 'Transparent Bridge'
                 elif name.startswith(('eth', 'enp', 'lan', 'end')):
                     role = 'Ethernet'
@@ -3093,9 +3216,9 @@ class NACWebHandler(BaseHTTPRequestHandler):
                 # Fallback to embedded template
                 html_content = get_html_template()
             
-            self.send_response(200)
+        self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.end_headers()
+        self.end_headers()
             self.wfile.write(html_content.encode('utf-8'))
         except Exception as e:
             log(f"Error serving HTML: {e}", 'ERROR')
