@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>NAC-Tap WebUI Test</title>
+<style>
+body{font-family:Arial;padding:20px;background:#f5f5f5}
+.test-box{background:#fff;padding:20px;margin:10px 0;border-radius:8px;border-left:4px solid #28a745}
+.error{border-left-color:#dc3545}
+button{padding:10px 20px;margin:5px;cursor:pointer}
+#console{background:#000;color:#0f0;padding:15px;font-family:monospace;font-size:12px;height:300px;overflow-y:auto;margin-top:20px}
+</style>
+</head>
+<body>
+<h1>🔍 NAC-Tap WebUI Diagnostic</h1>
+
+<div class="test-box">
+<h3>✓ HTML Loading Test</h3>
+<p>If you can see this, HTML is loading correctly.</p>
+</div>
+
+<div class="test-box" id="jsTest">
+<h3>⏳ JavaScript Test</h3>
+<p>Testing...</p>
+</div>
+
+<div class="test-box" id="clickTest">
+<h3>🖱️ Click Test</h3>
+<button onclick="testClick(1)">Test Button 1</button>
+<button onclick="testClick(2)">Test Button 2</button>
+<button id="eventBtn">Test Button 3 (addEventListener)</button>
+<p id="clickResult">Click buttons above to test</p>
+</div>
+
+<div class="test-box">
+<h3>🌐 API Test</h3>
+<button onclick="testAPI()">Test /api/status</button>
+<p id="apiResult">Click to test API connection</p>
+</div>
+
+<h3>📋 Browser Console Output:</h3>
+<div id="console"></div>
+
+<script>
+// Capture console output
+const consoleDiv = document.getElementById('console');
+const originalConsoleLog = console.log;
+const originalConsoleError = console.error;
+
+function logToDiv(message, isError) {
+    const line = document.createElement('div');
+    line.textContent = (isError ? '❌ ' : '✓ ') + message;
+    line.style.color = isError ? '#f00' : '#0f0';
+    consoleDiv.appendChild(line);
+    consoleDiv.scrollTop = consoleDiv.scrollHeight;
+}
+
+console.log = function(...args) {
+    logToDiv(args.join(' '), false);
+    originalConsoleLog.apply(console, args);
+};
+
+console.error = function(...args) {
+    logToDiv(args.join(' '), true);
+    originalConsoleError.apply(console, args);
+};
+
+// Catch all errors
+window.onerror = function(msg, url, lineNo, columnNo, error) {
+    logToDiv(`ERROR: ${msg} at line ${lineNo}:${columnNo}`, true);
+    return false;
+};
+
+// Test 1: JavaScript execution
+console.log('JavaScript is executing');
+const jsTestDiv = document.getElementById('jsTest');
+if (jsTestDiv) {
+    jsTestDiv.innerHTML = '<h3>✓ JavaScript Test</h3><p style="color:#28a745">JavaScript is working!</p>';
+    jsTestDiv.style.borderLeftColor = '#28a745';
+}
+
+// Test 2: Click handlers
+function testClick(num) {
+    const result = document.getElementById('clickResult');
+    result.textContent = `✓ Button ${num} clicked successfully!`;
+    result.style.color = '#28a745';
+    console.log(`Button ${num} clicked`);
+}
+
+// Test 3: addEventListener
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('DOMContentLoaded event fired');
+    
+    const eventBtn = document.getElementById('eventBtn');
+    if (eventBtn) {
+        eventBtn.addEventListener('click', function() {
+            testClick(3);
+        });
+        console.log('Event listener attached to button 3');
+    } else {
+        console.error('Button 3 not found');
+    }
+});
+
+// Test 4: API connection
+async function testAPI() {
+    const resultDiv = document.getElementById('apiResult');
+    resultDiv.textContent = 'Testing...';
+    resultDiv.style.color = '#666';
+    
+    try {
+        console.log('Fetching /api/status...');
+        const response = await fetch('/api/status');
+        const data = await response.json();
+        resultDiv.textContent = '✓ API is working! Status: ' + data.status;
+        resultDiv.style.color = '#28a745';
+        console.log('API response:', data);
+    } catch (err) {
+        resultDiv.textContent = '❌ API Error: ' + err.message;
+        resultDiv.style.color = '#dc3545';
+        console.error('API error:', err);
+    }
+}
+
+console.log('Test page fully loaded');
+</script>
+</body>
+</html>
+

