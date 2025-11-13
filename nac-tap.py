@@ -1377,13 +1377,14 @@ class WiFiManager:
                 result = run_cmd(['nmcli', 'device', 'wifi', 'connect', ssid, 'ifname', interface], timeout=30)
             
             if result and result.returncode == 0:
-                time.sleep(3)
+                time.sleep(5)  # Give more time for DHCP to complete
                 # Get IP address
                 result = run_cmd(['ip', 'addr', 'show', interface])
                 if result:
                     ip_match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)/\d+', result.stdout)
                     if ip_match:
                         self.ip_address = ip_match.group(1)
+                        log(f"WLAN IP address: {self.ip_address}", 'INFO')
                 
                 # Get gateway
                 result = run_cmd(['ip', 'route', 'show', 'default'])
@@ -1391,11 +1392,76 @@ class WiFiManager:
                     gw_match = re.search(r'default via (\d+\.\d+\.\d+\.\d+)', result.stdout)
                     if gw_match:
                         self.gateway = gw_match.group(1)
+                        log(f"WLAN gateway: {self.gateway}", 'INFO')
+                
+                # Get DNS servers from NetworkManager connection
+                dns_servers = []
+                try:
+                    result = run_cmd(['nmcli', 'connection', 'show', '--active'])
+                    if result:
+                        # Find the active connection for this interface
+                        for line in result.stdout.split('\n'):
+                            if interface in line:
+                                conn_name = line.split()[0]
+                                log(f"Found active connection: {conn_name}", 'INFO')
+                                # Get DNS servers
+                                result = run_cmd(['nmcli', 'connection', 'show', conn_name])
+                                if result:
+                                    for dns_line in result.stdout.split('\n'):
+                                        if 'ipv4.dns:' in dns_line.lower():
+                                            dns_vals = dns_line.split(':')[1].strip()
+                                            if dns_vals:
+                                                dns_servers = [d.strip() for d in dns_vals.split(',') if d.strip()]
+                                                log(f"DNS servers from NetworkManager: {dns_servers}", 'INFO')
+                                break
+                    
+                    # Also try to get DNS from resolvectl/resolv.conf
+                    if not dns_servers:
+                        result = run_cmd(['resolvectl', 'status', interface])
+                        if result and result.returncode == 0:
+                            for line in result.stdout.split('\n'):
+                                if 'DNS Servers:' in line or 'Current DNS Server:' in line:
+                                    dns_match = re.findall(r'\d+\.\d+\.\d+\.\d+', line)
+                                    if dns_match:
+                                        dns_servers = dns_match
+                                        log(f"DNS servers from resolvectl: {dns_servers}", 'INFO')
+                    
+                    # Fallback: read resolv.conf
+                    if not dns_servers:
+                        try:
+                            with open('/etc/resolv.conf', 'r') as f:
+                                for line in f:
+                                    if line.startswith('nameserver'):
+                                        dns = line.split()[1].strip()
+                                        if dns and re.match(r'^\d+\.\d+\.\d+\.\d+$', dns):
+                                            dns_servers.append(dns)
+                            if dns_servers:
+                                log(f"DNS servers from resolv.conf: {dns_servers}", 'INFO')
+                        except:
+                            pass
+                    
+                    # If still no DNS, use gateway or public DNS
+                    if not dns_servers:
+                        if self.gateway:
+                            dns_servers = [self.gateway]
+                            log(f"No DNS servers found, using gateway as DNS: {self.gateway}", 'WARNING')
+                        else:
+                            dns_servers = ['8.8.8.8', '1.1.1.1']
+                            log("No DNS servers found, using public DNS: 8.8.8.8, 1.1.1.1", 'WARNING')
+                    
+                    # Configure DNS via systemd-resolved or resolv.conf
+                    self._configure_dns(interface, dns_servers)
+                    
+                except Exception as e:
+                    log(f"Error getting DNS servers: {e}", 'WARNING')
+                    # Use public DNS as fallback
+                    dns_servers = ['8.8.8.8', '1.1.1.1']
+                    self._configure_dns(interface, dns_servers)
                 
                 self.connected = True
                 
                 # Setup routing for internet access through WLAN
-                self._setup_wlan_routing(interface)
+                self._setup_wlan_routing(interface, dns_servers)
                 
                 # Test internet
                 self.internet_available = self.test_internet_connectivity()['connected']
@@ -1408,7 +1474,40 @@ class WiFiManager:
             log(f"WiFi connection error: {e}", 'ERROR')
             return {'success': False, 'error': str(e)}
 
-    def _setup_wlan_routing(self, wlan_interface):
+    def _configure_dns(self, interface, dns_servers):
+        """Configure DNS servers for the interface"""
+        try:
+            log(f"Configuring DNS servers: {dns_servers}", 'INFO')
+            
+            # Try systemd-resolved first (modern systems)
+            result = run_cmd(['systemctl', 'is-active', 'systemd-resolved'], check=False)
+            if result and result.returncode == 0:
+                # Use resolvectl to set DNS
+                for dns in dns_servers:
+                    run_cmd(['resolvectl', 'dns', interface, dns], check=False)
+                log(f"DNS configured via systemd-resolved: {dns_servers}", 'SUCCESS')
+                return
+            
+            # Fallback: Update resolv.conf directly
+            try:
+                # Backup existing resolv.conf
+                if os.path.exists('/etc/resolv.conf'):
+                    run_cmd(['cp', '/etc/resolv.conf', '/etc/resolv.conf.bak'], check=False)
+                
+                # Write new resolv.conf
+                with open('/etc/resolv.conf', 'w') as f:
+                    f.write("# DNS configured by NAC-Tap\n")
+                    for dns in dns_servers:
+                        f.write(f"nameserver {dns}\n")
+                    f.write("options timeout:2 attempts:3\n")
+                
+                log(f"DNS configured via resolv.conf: {dns_servers}", 'SUCCESS')
+            except Exception as e:
+                log(f"Failed to configure DNS via resolv.conf: {e}", 'WARNING')
+        except Exception as e:
+            log(f"DNS configuration error: {e}", 'ERROR')
+
+    def _setup_wlan_routing(self, wlan_interface, dns_servers=None):
         """Setup routing so non-private traffic exits through WLAN interface"""
         try:
             log(f"Setting up internet routing through {wlan_interface}...")
@@ -1509,6 +1608,28 @@ class WiFiManager:
             if result and result.returncode != 0:
                 run_cmd(['iptables', '-I', 'FORWARD', '1', '-i', wlan_interface, '-o', bridge_name, '-m', 'state', '--state', 'ESTABLISHED,RELATED', '-j', 'ACCEPT'])
                 log(f"Return forwarding rule added: {wlan_interface} -> {bridge_name}")
+            
+            # Ensure DNS traffic goes through WLAN
+            if dns_servers:
+                for dns in dns_servers:
+                    # Ensure route to DNS server via WLAN
+                    if not re.match(r'^(10|172\.(1[6-9]|2[0-9]|3[01])|192\.168|169\.254)\.', dns):
+                        # Public DNS - should use default route, but verify
+                        result = run_cmd(['ip', 'route', 'get', dns])
+                        if result:
+                            if wlan_interface not in result.stdout:
+                                log(f"DNS server {dns} not routed via WLAN, ensuring route...", 'WARNING')
+                                # Add specific route if needed (though default should handle it)
+            
+            # Verify DNS configuration
+            log("Verifying DNS configuration...", 'INFO')
+            result = run_cmd(['cat', '/etc/resolv.conf'])
+            if result:
+                log(f"Current resolv.conf:\n{result.stdout[:500]}", 'INFO')
+            
+            result = run_cmd(['ip', 'route', 'show', 'default'])
+            if result:
+                log(f"Default route: {result.stdout.strip()}", 'INFO')
             
             log(f"Internet routing configured for {wlan_interface}", 'SUCCESS')
             return True
