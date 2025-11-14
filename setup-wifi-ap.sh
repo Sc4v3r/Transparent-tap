@@ -84,10 +84,13 @@ echo ""
 echo "=== Configuring hostapd ==="
 cat > /etc/hostapd/hostapd.conf <<EOF
 # NAC Tap Management AP Configuration
+# Configured for macOS compatibility (2.4GHz only)
 interface=wlan0
 ssid=${AP_SSID}
 hw_mode=g
 channel=6
+# Force 2.4GHz band (g = 2.4GHz, a = 5GHz)
+# macOS compatibility: use 2.4GHz to avoid connection issues
 wmm_enabled=1
 macaddr_acl=0
 auth_algs=1
@@ -96,6 +99,11 @@ wpa=2
 wpa_passphrase=${AP_PASS}
 wpa_key_mgmt=WPA-PSK
 rsn_pairwise=CCMP
+# Additional macOS compatibility settings
+ieee80211n=1
+ht_capab=[HT20][SHORT-GI-20][SHORT-GI-40]
+# Disable 5GHz features to ensure 2.4GHz only
+country_code=US
 EOF
 
 # Enable hostapd service
@@ -112,6 +120,8 @@ echo "Network Details:"
 echo "  SSID: $AP_SSID"
 echo "  Static IP: 172.31.250.1"
 echo "  DHCP Range: 172.31.250.50-150"
+echo "  Band: 2.4GHz (macOS compatible)"
+echo "  Channel: 6"
 echo ""
 echo "Access NAC Tap Web Interface:"
 echo "  1. Connect to Wi-Fi: $AP_SSID"
@@ -119,6 +129,11 @@ echo "  2. Open browser: http://172.31.250.1:8080"
 echo ""
 echo "SSH Access:"
 echo "  ssh user@172.31.250.1"
+echo ""
+echo "macOS Compatibility:"
+echo "  ✓ Configured for 2.4GHz band (hw_mode=g)"
+echo "  ✓ 802.11n (HT) enabled for better compatibility"
+echo "  ✓ Channel 6 (non-overlapping 2.4GHz channel)"
 echo ""
 echo "To start NAC Tap monitoring:"
 echo "  sudo python3 nac-tap.py"
