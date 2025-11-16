@@ -50,7 +50,9 @@ if [ "$OS" = "debian" ]; then
         wireshark-common \
         net-tools \
         iptables \
-        ebtables
+        ebtables \
+        libpcap-dev \
+        file
     
     echo ""
     echo "✓ Debian/Ubuntu packages installed"
@@ -68,7 +70,9 @@ elif [ "$OS" = "redhat" ]; then
         wireshark-cli \
         net-tools \
         iptables \
-        ebtables
+        ebtables \
+        libpcap-devel \
+        file
     
     echo ""
     echo "✓ RedHat/CentOS packages installed"
@@ -127,24 +131,23 @@ else
         if git clone https://github.com/lgandx/PCredz.git "$PCREDZ_DIR" 2>&1; then
             echo "✓ PCredz cloned successfully"
             
+            # Note: libpcap-dev and file are already installed above
+            echo "✓ PCredz system dependencies available (libpcap-dev, file)"
+            
             # Create virtual environment
             echo "Creating Python virtual environment..."
             if python3 -m venv "$PCREDZ_DIR/venv" 2>&1; then
                 echo "✓ Virtual environment created"
                 
-                # Activate venv and install requirements
-                echo "Installing PCredz dependencies in virtual environment..."
-                if [ -f "$PCREDZ_DIR/requirements.txt" ]; then
-                    if "$PCREDZ_DIR/venv/bin/pip" install --upgrade pip >/dev/null 2>&1 && \
-                       "$PCREDZ_DIR/venv/bin/pip" install -r "$PCREDZ_DIR/requirements.txt" >/dev/null 2>&1; then
-                        echo "✓ PCredz dependencies installed"
-                    else
-                        echo "⚠️  Failed to install PCredz dependencies"
-                        echo "   You may need to install them manually:"
-                        echo "   cd $PCREDZ_DIR && venv/bin/pip install -r requirements.txt"
-                    fi
+                # Install PCredz Python dependencies in venv
+                echo "Installing PCredz Python dependencies in virtual environment..."
+                if "$PCREDZ_DIR/venv/bin/pip" install --upgrade pip >/dev/null 2>&1 && \
+                   "$PCREDZ_DIR/venv/bin/pip" install Cython python-libpcap >/dev/null 2>&1; then
+                    echo "✓ PCredz Python dependencies installed (Cython, python-libpcap)"
                 else
-                    echo "⚠️  requirements.txt not found in PCredz repository"
+                    echo "⚠️  Failed to install PCredz Python dependencies"
+                    echo "   You may need to install them manually:"
+                    echo "   cd $PCREDZ_DIR && venv/bin/pip install Cython python-libpcap"
                 fi
                 
                 # Create wrapper script that uses venv
@@ -169,11 +172,11 @@ EOF
                 echo "⚠️  Failed to create virtual environment"
                 echo "   Falling back to system Python"
                 # Fallback: use system Python
-                if [ -f "$PCREDZ_DIR/requirements.txt" ]; then
-                    echo "Installing PCredz dependencies (system Python)..."
-                    if pip3 install -r "$PCREDZ_DIR/requirements.txt" >/dev/null 2>&1; then
-                        echo "✓ PCredz dependencies installed (system Python)"
-                    fi
+                echo "Installing PCredz Python dependencies (system Python)..."
+                if pip3 install Cython python-libpcap >/dev/null 2>&1; then
+                    echo "✓ PCredz Python dependencies installed (system Python)"
+                else
+                    echo "⚠️  Failed to install PCredz Python dependencies"
                 fi
                 # Create wrapper without venv
                 cat > "$PCREDZ_WRAPPER" << 'EOF'

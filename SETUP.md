@@ -368,11 +368,12 @@ If PCredz wasn't installed automatically:
 ls -la /opt/PCredz
 
 # Manual installation
+sudo apt-get install -y libpcap-dev file
 sudo git clone https://github.com/lgandx/PCredz.git /opt/PCredz
 cd /opt/PCredz
 sudo python3 -m venv venv
 sudo venv/bin/pip install --upgrade pip
-sudo venv/bin/pip install -r requirements.txt
+sudo venv/bin/pip install Cython python-libpcap
 
 # Create wrapper script
 sudo tee /opt/PCredz/pcredz-wrapper.sh > /dev/null << 'EOF'
