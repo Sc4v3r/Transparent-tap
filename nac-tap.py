@@ -1332,22 +1332,72 @@ class WiFiManager:
             run_cmd(['rfkill', 'unblock', 'all'], check=False)
             time.sleep(1)
             
+            # Check if systemd-networkd is managing this interface
+            network_file = f"/etc/systemd/network/25-{interface}.network"
+            if os.path.exists(network_file):
+                log(f"Temporarily disabling systemd-networkd config for {interface}...", 'INFO')
+                # Backup and remove the config temporarily
+                backup_file = f"{network_file}.backup"
+                run_cmd(['cp', network_file, backup_file], check=False)
+                os.remove(network_file)
+                run_cmd(['systemctl', 'reload', 'systemd-networkd'], check=False)
+                time.sleep(2)
+            
+            # Also check for other systemd-networkd configs that might match
+            result = run_cmd(['find', '/etc/systemd/network', '-name', f'*{interface}*.network', '-type', 'f'], check=False)
+            if result and result.returncode == 0 and result.stdout.strip():
+                for config_file in result.stdout.strip().split('\n'):
+                    if config_file and os.path.exists(config_file):
+                        log(f"Found systemd-networkd config: {config_file}, temporarily disabling...", 'INFO')
+                        backup_file = f"{config_file}.backup"
+                        run_cmd(['cp', config_file, backup_file], check=False)
+                        os.remove(config_file)
+                run_cmd(['systemctl', 'reload', 'systemd-networkd'], check=False)
+                time.sleep(2)
+            
+            # Check if NetworkManager is managing this interface
+            result = run_cmd(['nmcli', 'device', 'status'], check=False)
+            if result and result.returncode == 0 and interface in result.stdout:
+                log(f"NetworkManager is managing {interface}, setting to unmanaged...", 'INFO')
+                run_cmd(['nmcli', 'device', 'set', interface, 'managed', 'no'], check=False)
+                time.sleep(2)
+            
             # Bring interface down first to reset state
             run_cmd(['ip', 'link', 'set', interface, 'down'], check=False)
-            time.sleep(1)
+            time.sleep(2)
             
             # Bring interface up
             result = run_cmd(['ip', 'link', 'set', interface, 'up'], check=False)
             if result and result.returncode != 0:
-                log(f"Failed to bring interface {interface} up: {result.stderr}", 'ERROR')
+                error_msg = result.stderr if result and result.stderr else "Unknown error"
+                log(f"Failed to bring interface {interface} up: {error_msg}", 'ERROR')
+                # Check what's preventing it
+                result = run_cmd(['ip', 'link', 'show', interface], check=False)
+                if result:
+                    log(f"Interface state: {result.stdout}", 'ERROR')
                 return False
             time.sleep(2)
             
             # Check interface state
             result = run_cmd(['ip', 'link', 'show', interface], check=False)
-            if result and 'state UP' not in result.stdout:
-                log(f"Interface {interface} is not UP after bringing it up", 'ERROR')
-                return False
+            if result:
+                if 'state UP' not in result.stdout:
+                    log(f"Interface {interface} is not UP after bringing it up", 'ERROR')
+                    log(f"Current state: {result.stdout}", 'ERROR')
+                    # Try one more time with more force
+                    run_cmd(['ip', 'link', 'set', interface, 'down'], check=False)
+                    time.sleep(1)
+                    run_cmd(['ip', 'link', 'set', interface, 'up'], check=False)
+                    time.sleep(2)
+                    result = run_cmd(['ip', 'link', 'show', interface], check=False)
+                    if result and 'state UP' not in result.stdout:
+                        log(f"Interface {interface} still not UP after retry", 'ERROR')
+                        log(f"State: {result.stdout}", 'ERROR')
+                        return False
+                else:
+                    log(f"Interface {interface} is UP", 'SUCCESS')
+            else:
+                log(f"Could not check interface {interface} state", 'WARNING')
             
             # Start wpa_supplicant with verbose logging
             pid_file = f"/var/run/wpa_supplicant-{interface}.pid"
