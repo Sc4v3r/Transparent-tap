@@ -23,13 +23,16 @@ A transparent Layer 2 network bridge with packet capture, MITM attack capabiliti
 # 1. Install dependencies
 sudo bash install-dependencies.sh
 
-# 2. Setup Wi-Fi management AP (optional but recommended)
+# 2. Setup Wi-Fi management AP (required)
 sudo bash setup-wifi-ap.sh
 
 # 3. Start NAC-Tap
 sudo python3 nac-tap.py
 
-# 4. Access web interface
+# 4. Connect to Wi-Fi Management AP
+# Connect your laptop/phone to the Wi-Fi network you configured in step 2
+
+# 5. Access web interface
 # http://172.31.250.1:8080 (via Wi-Fi) or http://localhost:8080
 ```
 
@@ -112,9 +115,9 @@ sudo bash install-dependencies.sh
 
 This installs all required packages and automatically sets up PCredz in a virtual environment.
 
-### Step 2: Setup Wi-Fi Management Access Point (Recommended)
+### Step 2: Setup Wi-Fi Management Access Point (Required)
 
-This creates a Wi-Fi network on `wlan0` that you can connect to for managing the device remotely. This is especially useful when the Ethernet interfaces are in bridge mode.
+This creates a Wi-Fi network on `wlan0` that you can connect to for managing the device remotely. **This is required** when the Ethernet interfaces are in bridge mode, as it provides the only way to access the device.
 
 ```bash
 sudo bash setup-wifi-ap.sh
@@ -146,7 +149,7 @@ iw dev wlan0 info
 ip addr show wlan0
 ```
 
-**Note:** The AP setup is **optional** but highly recommended. You can skip this if you prefer to manage via Ethernet or SSH port forwarding.
+**Note:** The AP setup is **required** when Ethernet interfaces are in bridge mode, as it provides the only way to manage the device remotely.
 
 ### Step 3: Start NAC-Tap
 
@@ -297,7 +300,7 @@ When deploying to a target device, ensure you have:
 - ✓ `app/static/index.html` (web UI)
 - ✓ `test-webui.html` (optional, for debugging)
 - ✓ `install-dependencies.sh` (installation script)
-- ✓ `setup-wifi-ap.sh` (optional, for AP setup)
+- ✓ `setup-wifi-ap.sh` (required, for AP setup)
 - ✓ `systemd/nac-tap.service` (optional, for service)
 
 ### Deployment Steps
@@ -314,7 +317,7 @@ cd /opt/nac-tap
 chmod +x install-dependencies.sh
 sudo ./install-dependencies.sh
 
-# 4. (Optional) Setup WiFi AP
+# 4. Setup WiFi AP (required)
 sudo ./setup-wifi-ap.sh
 
 # 5. Start NAC-Tap
