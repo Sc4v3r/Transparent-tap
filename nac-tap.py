@@ -1381,23 +1381,83 @@ class WiFiManager:
             # Check interface state
             result = run_cmd(['ip', 'link', 'show', interface], check=False)
             if result:
-                if 'state UP' not in result.stdout:
-                    log(f"Interface {interface} is not UP after bringing it up", 'ERROR')
-                    log(f"Current state: {result.stdout}", 'ERROR')
+                interface_state = result.stdout
+                log(f"Interface {interface} state: {interface_state}", 'INFO')
+                
+                # Check for "no carrier" - this means no physical connection
+                if 'NO-CARRIER' in interface_state or 'no carrier' in interface_state.lower():
+                    log(f"Interface {interface} has NO CARRIER - no physical connection detected", 'WARNING')
+                    log("This may be normal for WiFi interfaces that are not connected yet", 'INFO')
+                    log("Attempting to bring interface up anyway (carrier may appear after association)...", 'INFO')
+                    # For WiFi, no carrier is OK - we'll get carrier after association
+                    # Just make sure it's UP
+                    if 'state DOWN' in interface_state:
+                        log("Interface is DOWN, attempting to bring it UP...", 'INFO')
+                        run_cmd(['ip', 'link', 'set', interface, 'up'], check=False)
+                        time.sleep(2)
+                        result = run_cmd(['ip', 'link', 'show', interface], check=False)
+                        if result and 'state DOWN' in result.stdout:
+                            log(f"Interface {interface} still DOWN - may need hardware reset", 'ERROR')
+                            # Try to reset the interface via sysfs
+                            phy_path = f"/sys/class/net/{interface}/phy80211"
+                            if os.path.exists(phy_path):
+                                try:
+                                    phy_name = os.path.basename(os.readlink(phy_path))
+                                    log(f"Found PHY: {phy_name}, attempting reset...", 'INFO')
+                                    # Try to reset via rfkill
+                                    run_cmd(['rfkill', 'block', 'wifi'], check=False)
+                                    time.sleep(1)
+                                    run_cmd(['rfkill', 'unblock', 'wifi'], check=False)
+                                    time.sleep(2)
+                                    run_cmd(['ip', 'link', 'set', interface, 'up'], check=False)
+                                    time.sleep(2)
+                                except Exception as e:
+                                    log(f"Could not reset PHY: {e}", 'WARNING')
+                            # Check one more time after reset
+                            result = run_cmd(['ip', 'link', 'show', interface], check=False)
+                            if result and 'state DOWN' in result.stdout:
+                                return False
+                            # If we got here, interface might be UP now, continue
+                
+                if 'state UP' not in interface_state and 'state DOWN' in interface_state:
+                    log(f"Interface {interface} is DOWN after bringing it up", 'ERROR')
+                    log(f"Current state: {interface_state}", 'ERROR')
                     # Try one more time with more force
                     run_cmd(['ip', 'link', 'set', interface, 'down'], check=False)
                     time.sleep(1)
                     run_cmd(['ip', 'link', 'set', interface, 'up'], check=False)
                     time.sleep(2)
                     result = run_cmd(['ip', 'link', 'show', interface], check=False)
-                    if result and 'state UP' not in result.stdout:
-                        log(f"Interface {interface} still not UP after retry", 'ERROR')
-                        log(f"State: {result.stdout}", 'ERROR')
-                        return False
-                else:
+                    if result:
+                        if 'state UP' not in result.stdout and 'state DOWN' in result.stdout:
+                            log(f"Interface {interface} still DOWN after retry", 'ERROR')
+                            log(f"State: {result.stdout}", 'ERROR')
+                            log("This may indicate a hardware issue or driver problem", 'ERROR')
+                            return False
+                        elif 'state UP' in result.stdout:
+                            log(f"Interface {interface} is now UP after retry", 'SUCCESS')
+                elif 'state UP' in interface_state:
                     log(f"Interface {interface} is UP", 'SUCCESS')
             else:
                 log(f"Could not check interface {interface} state", 'WARNING')
+            
+            # Final verification - interface must be UP (no carrier is OK for WiFi)
+            result = run_cmd(['ip', 'link', 'show', interface], check=False)
+            if result:
+                if 'state DOWN' in result.stdout:
+                    log(f"Interface {interface} is still DOWN - cannot proceed with wpa_supplicant", 'ERROR')
+                    log(f"Full state: {result.stdout}", 'ERROR')
+                    return False
+                elif 'state UP' in result.stdout:
+                    # No carrier is OK for WiFi - it will get carrier after association
+                    if 'NO-CARRIER' in result.stdout or 'no carrier' in result.stdout.lower():
+                        log(f"Interface {interface} is UP (no carrier is normal for unconnected WiFi)", 'INFO')
+                    else:
+                        log(f"Interface {interface} is UP", 'SUCCESS')
+                else:
+                    log(f"Interface {interface} state unclear, proceeding anyway: {result.stdout}", 'WARNING')
+            else:
+                log(f"Could not verify interface {interface} state, proceeding anyway", 'WARNING')
             
             # Start wpa_supplicant with verbose logging
             pid_file = f"/var/run/wpa_supplicant-{interface}.pid"
