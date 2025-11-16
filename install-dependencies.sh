@@ -50,7 +50,6 @@ if [ "$OS" = "debian" ]; then
         bridge-utils \
         ethtool \
         wireshark-common \
-        net-tools \
         iptables \
         ebtables \
         libpcap-dev \
@@ -116,7 +115,6 @@ elif [ "$OS" = "redhat" ]; then
         bridge-utils \
         ethtool \
         wireshark-cli \
-        net-tools \
         iptables \
         ebtables \
         libpcap-devel \
