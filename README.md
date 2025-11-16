@@ -141,7 +141,7 @@ sudo yum install wireshark-cli
 ### Permission Denied Errors
 Ensure you're running with sudo:
 ```bash
-sudo python3 script.py
+sudo python3 nac-tap.py
 ```
 
 ### Network Interface Not Found

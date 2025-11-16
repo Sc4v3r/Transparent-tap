@@ -3,7 +3,7 @@
 NAC Bridge Monitor - Transparent Inline Tap Edition
 Completely transparent L2 bridge for 802.1X environments
 No stealth mode - bridge always active for seamless operation
-Run as root: sudo python3 nac-monitor.py
+Run as root: sudo python3 nac-tap.py
 """
 
 import os

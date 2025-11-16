@@ -37,6 +37,7 @@ sudo python3 nac-tap.py
 # Copy files to /opt
 sudo mkdir -p /opt/nac-tap
 sudo cp nac-tap.py /opt/nac-tap/
+sudo cp -r app /opt/nac-tap/  # Web UI files
 sudo cp systemd/nac-tap.service /etc/systemd/system/
 
 # Enable and start service
@@ -123,6 +124,27 @@ ntlmrelayx.py -t smb://target -smb2support
 #### Disable MITM
 1. Click **🛑 Disable MITM**
 2. All rules and spoofing cleaned up automatically
+
+### Upload Tab - WiFi & Slack Integration
+
+#### Connect to WiFi
+1. Click **📤 Upload** tab
+2. Select WLAN interface (wlan1 or wlan2)
+3. Click **Scan for APs** to find networks
+4. Enter SSID and password
+5. Click **Connect**
+6. Test internet connectivity using the test button
+
+#### Configure Slack Upload
+1. Enter **Slack Webhook URL** (for notifications)
+2. Enter **Slack Bot Token** (for file uploads)
+3. Enter **Slack Channel** name
+4. Enable **Auto Upload** to automatically send captures
+5. Click **Save Configuration**
+
+#### Manual Upload
+1. Click **Upload Now** to manually trigger upload
+2. Select what to upload: PCAP files and/or PCredz output
 
 ## File Locations
 

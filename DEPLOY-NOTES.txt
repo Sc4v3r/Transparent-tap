@@ -5,14 +5,15 @@ To deploy NAC-Tap to your target device:
 
 1. REQUIRED FILES (keep in same directory):
    ✓ nac-tap.py
-   ✓ test-webui.html
+   ✓ app/static/index.html (web UI)
+   ✓ test-webui.html (optional, for debugging)
    ✓ install-dependencies.sh
    ✓ setup-wifi-ap.sh (optional)
 
 2. DEPLOYMENT STEPS:
 
    a) Copy all files to target device:
-      scp nac-tap.py test-webui.html install-*.sh user@target-device:/opt/nac-tap/
+      scp -r nac-tap.py app/ test-webui.html install-*.sh setup-*.sh user@target-device:/opt/nac-tap/
 
    b) SSH to target device:
       ssh user@target-device

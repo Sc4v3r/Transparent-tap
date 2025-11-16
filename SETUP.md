@@ -150,6 +150,7 @@ The script will:
 sudo mkdir -p /opt/nac-tap
 sudo cp nac-tap.py /opt/nac-tap/
 sudo cp -r app /opt/nac-tap/
+sudo cp test-webui.html /opt/nac-tap/  # Optional, for debugging
 
 # Install systemd service
 sudo cp systemd/nac-tap.service /etc/systemd/system/
@@ -255,7 +256,17 @@ See [MITM-FEATURES.md](MITM-FEATURES.md) for detailed MITM attack instructions.
 
 ### Upload to Slack
 
-See [QUICKSTART.md](QUICKSTART.md) for Slack integration setup.
+The Upload tab in the web interface allows you to:
+- Connect to WiFi networks (wlan1/wlan2) for internet access
+- Configure Slack webhook and bot token for automatic file uploads
+- Test internet connectivity when connected to an AP
+- Enable automatic upload of PCAP files and PCredz output to Slack
+
+**Setup:**
+1. Go to **Upload** tab in web interface
+2. Configure Slack webhook URL and bot token
+3. (Optional) Connect to WiFi for internet access
+4. Enable auto-upload to automatically send captures to Slack
 
 ---
 
