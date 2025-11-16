@@ -52,7 +52,10 @@ if [ "$OS" = "debian" ]; then
         iptables \
         ebtables \
         libpcap-dev \
-        file
+        file \
+        wpa_supplicant \
+        wireless-tools \
+        isc-dhcp-client
     
     echo ""
     echo "✓ Debian/Ubuntu packages installed"
@@ -72,7 +75,9 @@ elif [ "$OS" = "redhat" ]; then
         iptables \
         ebtables \
         libpcap-devel \
-        file
+        file \
+        wpa_supplicant \
+        dhclient
     
     echo ""
     echo "✓ RedHat/CentOS packages installed"

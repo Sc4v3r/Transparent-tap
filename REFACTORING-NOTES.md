@@ -49,9 +49,7 @@ app/static/index.html (1,200 lines) ← Properly formatted HTML/CSS/JS
 │       └── index.html              ← Web UI (HTML/CSS/JS)
 ├── test-webui.html                 ← Diagnostic test page
 ├── install-dependencies.sh         ← System dependencies
-├── install-evilginx.sh             ← Evilginx2 installer
 ├── setup-wifi-ap.sh                ← WiFi AP setup
-├── EVILGINX-SETUP.md               ← Evilginx documentation
 ├── QUICKSTART.md                   ← Quick start guide
 └── README.md                       ← Main documentation
 ```
@@ -83,7 +81,6 @@ If `app/static/index.html` is missing, the script will automatically fall back t
    modules/
    ├── bridge_manager.py
    ├── mitm_manager.py
-   ├── evilginx_manager.py
    ├── loot_analyzer.py
    └── web_handler.py
    ```

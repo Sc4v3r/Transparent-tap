@@ -71,25 +71,6 @@ INTERCEPT_PROTOCOLS = {
     'http': [
         ('HTTP', 80, ['tcp']),
     ],
-    'evilginx': [
-        ('HTTP', 80, ['tcp']),
-        ('HTTPS', 443, ['tcp']),
-        ('DNS', 53, ['udp']),
-    ],
-}
-
-# Microsoft phishlets for Evilginx2
-MICROSOFT_PHISHLETS = {
-    'o365': {
-        'name': 'o365',
-        'domains': 'login.microsoftonline.com',
-        'description': 'Microsoft 365 / Outlook / Office'
-    },
-    'outlook': {
-        'name': 'outlook',
-        'domains': 'outlook.live.com',
-        'description': 'Outlook.com (Personal)'
-    }
 }
 
 capture_lock = threading.Lock()
@@ -1120,31 +1101,75 @@ class WiFiManager:
         return interfaces
 
     def scan_aps(self, interface):
-        """Scan for available access points"""
+        """Scan for available access points using iw"""
         self.scan_results = []
         try:
-            # Try nmcli first (NetworkManager)
-            result = run_cmd(['nmcli', '-t', '-f', 'SSID,SIGNAL,SECURITY,CHAN', 'device', 'wifi', 'list', 'ifname', interface], timeout=15)
+            # Use iw dev <interface> scan (no NetworkManager needed)
+            result = run_cmd(['iw', 'dev', interface, 'scan'], timeout=15, check=False)
             if result and result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
+                current_ap = {}
+                for line in result.stdout.split('\n'):
+                    line = line.strip()
                     if not line:
                         continue
-                    parts = line.split(':')
-                    if len(parts) >= 4:
-                        ssid = parts[0]
-                        signal = int(parts[1]) if parts[1].isdigit() else -100
-                        security = parts[2] if parts[2] else 'Open'
-                        channel = parts[3] if len(parts) > 3 and parts[3] else '0'
-                        self.scan_results.append({
-                            'ssid': ssid,
-                            'signal': signal,
-                            'security': security,
-                            'channel': channel
-                        })
-                return self.scan_results
+                    
+                    # SSID
+                    if line.startswith('SSID:'):
+                        if current_ap:
+                            self.scan_results.append(current_ap)
+                        ssid = line.split('SSID:')[1].strip()
+                        current_ap = {'ssid': ssid, 'signal': -100, 'security': 'Unknown', 'channel': '0'}
+                    
+                    # Signal strength
+                    elif 'signal:' in line.lower():
+                        sig_match = re.search(r'signal:\s*(-?\d+\.?\d*)', line, re.IGNORECASE)
+                        if sig_match:
+                            try:
+                                current_ap['signal'] = int(float(sig_match.group(1)))
+                            except:
+                                pass
+                    
+                    # Security (WPA/WPA2)
+                    elif 'WPA' in line or 'RSN' in line:
+                        if 'WPA2' in line or 'RSN' in line:
+                            current_ap['security'] = 'WPA2'
+                        elif 'WPA' in line:
+                            current_ap['security'] = 'WPA'
+                    
+                    # Channel
+                    elif 'freq:' in line.lower():
+                        freq_match = re.search(r'freq:\s*(\d+)', line, re.IGNORECASE)
+                        if freq_match:
+                            try:
+                                freq = int(freq_match.group(1))
+                                # Convert frequency to channel (approximate)
+                                if 2412 <= freq <= 2484:  # 2.4 GHz
+                                    channel = (freq - 2412) // 5 + 1
+                                elif 5170 <= freq <= 5825:  # 5 GHz
+                                    channel = (freq - 5000) // 5
+                                else:
+                                    channel = '0'
+                                current_ap['channel'] = str(channel)
+                            except:
+                                pass
+                
+                # Add last AP
+                if current_ap:
+                    self.scan_results.append(current_ap)
+                
+                # Remove duplicates (same SSID)
+                seen = set()
+                unique_results = []
+                for ap in self.scan_results:
+                    if ap['ssid'] not in seen:
+                        seen.add(ap['ssid'])
+                        unique_results.append(ap)
+                self.scan_results = unique_results
+                
+                log(f"Found {len(self.scan_results)} access points", 'INFO')
             else:
-                # Fallback to iwlist
-                result = run_cmd(['iwlist', interface, 'scan'], timeout=15)
+                # Fallback to iwlist if iw fails
+                result = run_cmd(['iwlist', interface, 'scan'], timeout=15, check=False)
                 if result and result.returncode == 0:
                     current_ap = {}
                     for line in result.stdout.split('\n'):
@@ -1152,7 +1177,7 @@ class WiFiManager:
                         if 'ESSID:' in line:
                             if current_ap:
                                 self.scan_results.append(current_ap)
-                            current_ap = {'ssid': line.split('ESSID:')[1].strip().strip('"')}
+                            current_ap = {'ssid': line.split('ESSID:')[1].strip().strip('"'), 'signal': -100, 'security': 'Open', 'channel': '0'}
                         elif 'Signal level=' in line:
                             sig_match = re.search(r'Signal level=(-?\d+)', line)
                             if sig_match:
@@ -1165,120 +1190,77 @@ class WiFiManager:
                                 current_ap['channel'] = ch_match.group(1)
                     if current_ap:
                         self.scan_results.append(current_ap)
+                else:
+                    error = result.stderr if result else "Unknown error"
+                    log(f"AP scan failed: {error}", 'ERROR')
         except Exception as e:
             log(f"AP scan failed: {e}", 'ERROR')
         return self.scan_results
 
     def connect_to_ap(self, interface, ssid, password=None):
-        """Connect to WiFi AP"""
+        """Connect to WiFi AP using wpa_supplicant and systemd-networkd"""
         try:
             self.interface = interface
             self.ssid = ssid
             self.password = password
             
-            # Try nmcli first
-            if password:
-                result = run_cmd(['nmcli', 'device', 'wifi', 'connect', ssid, 'password', password, 'ifname', interface], timeout=30)
-            else:
-                result = run_cmd(['nmcli', 'device', 'wifi', 'connect', ssid, 'ifname', interface], timeout=30)
+            log(f"Connecting to WiFi using wpa_supplicant...", 'INFO')
             
-            if result and result.returncode == 0:
-                time.sleep(5)  # Give more time for DHCP to complete
-                # Get IP address
-                result = run_cmd(['ip', 'addr', 'show', interface])
-                if result:
-                    ip_match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)/\d+', result.stdout)
-                    if ip_match:
-                        self.ip_address = ip_match.group(1)
-                        log(f"WLAN IP address: {self.ip_address}", 'INFO')
-                
-                # Get gateway
-                result = run_cmd(['ip', 'route', 'show', 'default'])
-                if result:
-                    gw_match = re.search(r'default via (\d+\.\d+\.\d+\.\d+)', result.stdout)
-                    if gw_match:
-                        self.gateway = gw_match.group(1)
-                        log(f"WLAN gateway: {self.gateway}", 'INFO')
-                
-                # Get DNS servers from NetworkManager connection
-                dns_servers = []
-                try:
-                    result = run_cmd(['nmcli', 'connection', 'show', '--active'])
-                    if result:
-                        # Find the active connection for this interface
-                        for line in result.stdout.split('\n'):
-                            if interface in line:
-                                conn_name = line.split()[0]
-                                log(f"Found active connection: {conn_name}", 'INFO')
-                                # Get DNS servers
-                                result = run_cmd(['nmcli', 'connection', 'show', conn_name])
-                                if result:
-                                    for dns_line in result.stdout.split('\n'):
-                                        if 'ipv4.dns:' in dns_line.lower():
-                                            dns_vals = dns_line.split(':')[1].strip()
-                                            if dns_vals:
-                                                dns_servers = [d.strip() for d in dns_vals.split(',') if d.strip()]
-                                                log(f"DNS servers from NetworkManager: {dns_servers}", 'INFO')
-                                break
-                    
-                    # Also try to get DNS from resolvectl/resolv.conf
-                    if not dns_servers:
-                        result = run_cmd(['resolvectl', 'status', interface])
-                        if result and result.returncode == 0:
-                            for line in result.stdout.split('\n'):
-                                if 'DNS Servers:' in line or 'Current DNS Server:' in line:
-                                    dns_match = re.findall(r'\d+\.\d+\.\d+\.\d+', line)
-                                    if dns_match:
-                                        dns_servers = dns_match
-                                        log(f"DNS servers from resolvectl: {dns_servers}", 'INFO')
-                    
-                    # Fallback: read resolv.conf
-                    if not dns_servers:
-                        try:
-                            with open('/etc/resolv.conf', 'r') as f:
-                                for line in f:
-                                    if line.startswith('nameserver'):
-                                        dns = line.split()[1].strip()
-                                        if dns and re.match(r'^\d+\.\d+\.\d+\.\d+$', dns):
-                                            dns_servers.append(dns)
-                            if dns_servers:
-                                log(f"DNS servers from resolv.conf: {dns_servers}", 'INFO')
-                        except:
-                            pass
-                    
-                    # If still no DNS, use gateway or public DNS
-                    if not dns_servers:
-                        if self.gateway:
-                            dns_servers = [self.gateway]
-                            log(f"No DNS servers found, using gateway as DNS: {self.gateway}", 'WARNING')
-                        else:
-                            dns_servers = ['8.8.8.8', '1.1.1.1']
-                            log("No DNS servers found, using public DNS: 8.8.8.8, 1.1.1.1", 'WARNING')
-                    
-                    # Configure DNS for client interface (prevent conflicts with AP)
-                    self.dns_manager.configure_client_dns(interface, dns_servers)
-                    
-                except Exception as e:
-                    log(f"Error getting DNS servers: {e}", 'WARNING')
-                    # Use public DNS as fallback
-                    dns_servers = ['8.8.8.8', '1.1.1.1']
-                    self.dns_manager.configure_client_dns(interface, dns_servers)
-                
-                self.connected = True
-                
-                # Prevent DNS conflicts before setting up routing
-                self._prevent_dns_conflicts()
-                
-                # Setup routing for internet access through WLAN
-                self._setup_wlan_routing(interface, dns_servers)
-                
-                # Test internet
-                self.internet_available = self.test_internet_connectivity()['connected']
-                return {'success': True, 'connected': True, 'internet': self.test_internet_connectivity()}
-            else:
-                error = result.stderr if result else "Unknown error"
-                log(f"WiFi connection failed: {error}", 'ERROR')
-                return {'success': False, 'error': error}
+            # Step 1: Create wpa_supplicant config
+            config_file = self._create_wpa_supplicant_config(interface, ssid, password)
+            if not config_file:
+                return {'success': False, 'error': 'Failed to create wpa_supplicant config'}
+            
+            # Step 2: Start wpa_supplicant and wait for association
+            if not self._start_wpa_supplicant(interface, config_file):
+                return {'success': False, 'error': 'Failed to associate with WiFi network'}
+            
+            log("WiFi associated. Configuring network with systemd-networkd...", 'INFO')
+            
+            # Step 3: Create systemd-networkd config for DHCP
+            if not self._create_systemd_network_config(interface):
+                log("Warning: systemd-networkd config failed, trying manual DHCP...", 'WARNING')
+                # Fallback: try dhclient manually
+                result = run_cmd(['dhclient', interface], timeout=30, check=False)
+                if not result or result.returncode != 0:
+                    return {'success': False, 'error': 'Failed to configure network'}
+            
+            # Step 4: Wait for DHCP lease (up to 15 seconds)
+            max_wait = 15
+            waited = 0
+            network_info = None
+            while waited < max_wait:
+                network_info = self._get_network_info(interface)
+                if network_info['ip_address']:
+                    break
+                time.sleep(2)
+                waited += 2
+            
+            if not network_info or not network_info['ip_address']:
+                return {'success': False, 'error': 'DHCP timeout - no IP address obtained'}
+            
+            # Step 5: Store network information
+            self.ip_address = network_info['ip_address']
+            self.gateway = network_info['gateway']
+            dns_servers = network_info['dns_servers']
+            
+            log(f"Network configured. IP: {self.ip_address}, Gateway: {self.gateway}", 'SUCCESS')
+            
+            # Step 6: Configure DNS for client interface (prevent conflicts with AP)
+            self.dns_manager.configure_client_dns(interface, dns_servers)
+            
+            self.connected = True
+            
+            # Step 7: Prevent DNS conflicts before setting up routing
+            self._prevent_dns_conflicts()
+            
+            # Step 8: Setup routing for internet access through WLAN
+            self._setup_wlan_routing(interface, dns_servers)
+            
+            # Step 9: Test internet
+            self.internet_available = self.test_internet_connectivity()['connected']
+            return {'success': True, 'connected': True, 'internet': self.test_internet_connectivity()}
+            
         except Exception as e:
             log(f"WiFi connection error: {e}", 'ERROR')
             return {'success': False, 'error': str(e)}
@@ -1290,6 +1272,180 @@ class WiFiManager:
             self.dns_manager.configure_ap_dns()
         else:
             self.dns_manager.configure_client_dns(interface, dns_servers)
+    
+    def _create_wpa_supplicant_config(self, interface, ssid, password=None):
+        """Create wpa_supplicant config file for WiFi connection"""
+        try:
+            config_file = f"/tmp/wpa_supplicant-{interface}.conf"
+            
+            with open(config_file, 'w') as f:
+                f.write("ctrl_interface=/var/run/wpa_supplicant\n")
+                f.write("update_config=1\n")
+                f.write("\n")
+                f.write("network={\n")
+                f.write(f'    ssid="{ssid}"\n')
+                
+                if password:
+                    # Generate PSK from password
+                    result = run_cmd(['wpa_passphrase', ssid, password], check=False)
+                    if result and result.returncode == 0:
+                        # Extract psk from wpa_passphrase output
+                        for line in result.stdout.split('\n'):
+                            if 'psk=' in line:
+                                f.write(f"    {line.strip()}\n")
+                                break
+                    else:
+                        # Fallback: use password directly (less secure but works)
+                        f.write(f'    psk="{password}"\n')
+                    f.write("    key_mgmt=WPA-PSK\n")
+                else:
+                    f.write("    key_mgmt=NONE\n")
+                
+                f.write("}\n")
+            
+            log(f"Created wpa_supplicant config: {config_file}", 'INFO')
+            return config_file
+        except Exception as e:
+            log(f"Failed to create wpa_supplicant config: {e}", 'ERROR')
+            return None
+    
+    def _start_wpa_supplicant(self, interface, config_file):
+        """Start wpa_supplicant daemon and wait for association"""
+        try:
+            # Kill any existing wpa_supplicant for this interface
+            run_cmd(['pkill', '-f', f'wpa_supplicant.*-i.*{interface}'], check=False)
+            time.sleep(1)
+            
+            # Bring interface up
+            run_cmd(['ip', 'link', 'set', interface, 'up'], check=False)
+            time.sleep(1)
+            
+            # Start wpa_supplicant
+            pid_file = f"/var/run/wpa_supplicant-{interface}.pid"
+            result = run_cmd([
+                'wpa_supplicant', '-B', '-i', interface,
+                '-c', config_file, '-P', pid_file
+            ], timeout=10)
+            
+            if result and result.returncode == 0:
+                log(f"wpa_supplicant started for {interface}", 'INFO')
+                
+                # Wait for association (poll up to 30 seconds)
+                max_wait = 30
+                waited = 0
+                while waited < max_wait:
+                    result = run_cmd(['iw', 'dev', interface, 'link'], check=False)
+                    if result and result.returncode == 0 and 'Connected' in result.stdout:
+                        log(f"WiFi associated to network on {interface}", 'SUCCESS')
+                        return True
+                    time.sleep(2)
+                    waited += 2
+                
+                log(f"WiFi association timeout after {max_wait} seconds", 'WARNING')
+                return False
+            else:
+                error = result.stderr if result else "Unknown error"
+                log(f"Failed to start wpa_supplicant: {error}", 'ERROR')
+                return False
+        except Exception as e:
+            log(f"wpa_supplicant start error: {e}", 'ERROR')
+            return False
+    
+    def _create_systemd_network_config(self, interface):
+        """Create systemd-networkd config file for DHCP"""
+        try:
+            network_file = f"/etc/systemd/network/25-{interface}.network"
+            
+            with open(network_file, 'w') as f:
+                f.write(f"[Match]\n")
+                f.write(f"Name={interface}\n")
+                f.write(f"\n")
+                f.write(f"[Network]\n")
+                f.write(f"DHCP=yes\n")
+            
+            log(f"Created systemd-networkd config: {network_file}", 'INFO')
+            
+            # Reload systemd-networkd
+            result = run_cmd(['systemctl', 'reload', 'systemd-networkd'], check=False)
+            if result and result.returncode == 0:
+                log("systemd-networkd reloaded", 'INFO')
+                return True
+            else:
+                log("Failed to reload systemd-networkd", 'WARNING')
+                return False
+        except Exception as e:
+            log(f"Failed to create systemd-networkd config: {e}", 'ERROR')
+            return False
+    
+    def _get_network_info(self, interface):
+        """Extract IP, gateway, and DNS information after DHCP"""
+        ip_address = None
+        gateway = None
+        dns_servers = []
+        
+        try:
+            # Get IP address
+            result = run_cmd(['ip', 'addr', 'show', interface])
+            if result:
+                ip_match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)/\d+', result.stdout)
+                if ip_match:
+                    ip_address = ip_match.group(1)
+                    log(f"IP address: {ip_address}", 'INFO')
+            
+            # Get gateway
+            result = run_cmd(['ip', 'route', 'show', 'default'])
+            if result:
+                gw_match = re.search(r'default via (\d+\.\d+\.\d+\.\d+)', result.stdout)
+                if gw_match:
+                    gateway = gw_match.group(1)
+                    log(f"Gateway: {gateway}", 'INFO')
+            
+            # Get DNS servers
+            result = run_cmd(['resolvectl', 'status', interface], check=False)
+            if result and result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if 'DNS Servers:' in line or 'Current DNS Server:' in line:
+                        dns_match = re.findall(r'\d+\.\d+\.\d+\.\d+', line)
+                        if dns_match:
+                            dns_servers = dns_match
+                            log(f"DNS servers from resolvectl: {dns_servers}", 'INFO')
+                            break
+            
+            # Fallback: read resolv.conf
+            if not dns_servers:
+                try:
+                    with open('/etc/resolv.conf', 'r') as f:
+                        for line in f:
+                            if line.startswith('nameserver'):
+                                dns = line.split()[1].strip()
+                                if dns and re.match(r'^\d+\.\d+\.\d+\.\d+$', dns):
+                                    dns_servers.append(dns)
+                    if dns_servers:
+                        log(f"DNS servers from resolv.conf: {dns_servers}", 'INFO')
+                except:
+                    pass
+            
+            # Final fallback: use gateway or public DNS
+            if not dns_servers:
+                if gateway:
+                    dns_servers = [gateway]
+                    log(f"Using gateway as DNS: {gateway}", 'WARNING')
+                else:
+                    dns_servers = ['8.8.8.8', '1.1.1.1']
+                    log("Using public DNS: 8.8.8.8, 1.1.1.1", 'WARNING')
+            
+            return {
+                'ip_address': ip_address,
+                'gateway': gateway,
+                'dns_servers': dns_servers
+            }
+        except Exception as e:
+            log(f"Error getting network info: {e}", 'WARNING')
+            return {
+                'ip_address': None,
+                'gateway': None,
+                'dns_servers': ['8.8.8.8', '1.1.1.1']
+            }
     
     def _prevent_dns_conflicts(self):
         """Prevent DNS conflicts between AP and client WLAN"""
@@ -1529,17 +1685,44 @@ class WiFiManager:
             return False
 
     def disconnect_wifi(self):
-        """Disconnect from WiFi"""
+        """Disconnect from WiFi and clean up wpa_supplicant and systemd-networkd"""
         try:
             wlan_iface = self.interface
             if wlan_iface:
                 # Cleanup routing before disconnecting
                 self._cleanup_wlan_routing(wlan_iface)
-                run_cmd(['nmcli', 'device', 'disconnect', wlan_iface])
+                
+                # Kill wpa_supplicant
+                run_cmd(['pkill', '-f', f'wpa_supplicant.*-i.*{wlan_iface}'], check=False)
+                time.sleep(1)
+                
+                # Remove systemd-networkd config
+                network_file = f"/etc/systemd/network/25-{wlan_iface}.network"
+                if os.path.exists(network_file):
+                    os.remove(network_file)
+                    log(f"Removed systemd-networkd config: {network_file}", 'INFO')
+                    run_cmd(['systemctl', 'reload', 'systemd-networkd'], check=False)
+                
+                # Remove wpa_supplicant config
+                config_file = f"/tmp/wpa_supplicant-{wlan_iface}.conf"
+                if os.path.exists(config_file):
+                    os.remove(config_file)
+                
+                # Remove PID file
+                pid_file = f"/var/run/wpa_supplicant-{wlan_iface}.pid"
+                if os.path.exists(pid_file):
+                    os.remove(pid_file)
+                
+                # Bring interface down
+                run_cmd(['ip', 'link', 'set', wlan_iface, 'down'], check=False)
+                
+                log(f"WiFi disconnected from {wlan_iface}", 'INFO')
+            
             self.connected = False
             self.ip_address = None
             self.gateway = None
             self.internet_available = False
+            self.interface = None
             return True
         except Exception as e:
             log(f"WiFi disconnect error: {e}", 'ERROR')
@@ -2348,7 +2531,7 @@ def enable_internet_routing(bridge_name='br0'):
         result = run_cmd(['ping', '-c', '2', '-W', '3', '8.8.8.8'], timeout=8)
         if result and result.returncode == 0:
             log("SUCCESS! Internet routing is working!", 'SUCCESS')
-            log("You can now install Evilginx2, run apt update, etc.")
+            log("You can now run apt update, etc.")
         else:
             log("Ping test failed - checking DNS...", 'WARNING')
             result = run_cmd(['ping', '-c', '1', 'google.com'], timeout=5)
@@ -2481,9 +2664,8 @@ class BridgeManager:
                 self._force_cleanup_bridge()
                 time.sleep(2)
 
-            # Isolate interfaces from NetworkManager
-            log("Isolating interfaces from NetworkManager...")
-            self._isolate_networkmanager([client_int, switch_int])
+            # Note: NetworkManager isolation not needed - using wpa_supplicant + systemd-networkd
+            # Bridge interfaces are managed directly via ip commands, not NetworkManager
 
             time.sleep(1)
 
@@ -2724,45 +2906,12 @@ class BridgeManager:
             return False
 
     def _isolate_networkmanager(self, interfaces):
-        """Isolate specified interfaces from NetworkManager"""
-        try:
-            log("Isolating interfaces from NetworkManager...", 'INFO')
-            
-            # Get AP interface (should not be managed)
-            ap_interface = CONFIG.get('WIFI_AP_INTERFACE', 'wlan0')
-            
-            # Unmanage bridge interfaces
-            for iface in interfaces:
-                if iface:
-                    result = run_cmd(['nmcli', 'device', 'set', iface, 'managed', 'no'], check=False)
-                    if result and result.returncode == 0:
-                        log(f"  ✓ {iface}: Unmanaged by NetworkManager", 'SUCCESS')
-                    else:
-                        log(f"  ⚠ {iface}: Failed to unmanage (may already be unmanaged)", 'WARNING')
-            
-            # Unmanage AP interface if configured (it's for management AP, not client)
-            if ap_interface:
-                result = run_cmd(['nmcli', 'device', 'set', ap_interface, 'managed', 'no'], check=False)
-                if result and result.returncode == 0:
-                    log(f"  ✓ {ap_interface}: Unmanaged by NetworkManager (AP mode)", 'SUCCESS')
-                else:
-                    log(f"  ⚠ {ap_interface}: Failed to unmanage (may already be unmanaged)", 'WARNING')
-            
-            # Keep client WLAN managed by NetworkManager for DHCP
-            client_interface = CONFIG.get('WIFI_CLIENT_INTERFACE')
-            if client_interface:
-                result = run_cmd(['nmcli', 'device', 'set', client_interface, 'managed', 'yes'], check=False)
-                if result and result.returncode == 0:
-                    log(f"  ✓ {client_interface}: Managed by NetworkManager (for DHCP)", 'SUCCESS')
-                else:
-                    log(f"  ⚠ {client_interface}: Failed to manage (may already be managed)", 'WARNING')
-            
-            log("NetworkManager isolation complete", 'SUCCESS')
-            return True
-            
-        except Exception as e:
-            log(f"NetworkManager isolation failed: {e}", 'WARNING')
-            return False
+        """Isolate specified interfaces from NetworkManager (deprecated - no longer needed)"""
+        # This method is kept for backward compatibility but does nothing
+        # WiFi connections now use wpa_supplicant + systemd-networkd
+        # Bridge interfaces are managed directly via ip commands
+        log("NetworkManager isolation skipped (using wpa_supplicant + systemd-networkd)", 'INFO')
+        return True
 
     def _force_cleanup_bridge(self):
         """Force cleanup bridge"""
@@ -3587,7 +3736,6 @@ input[type="text"]:focus{outline:none;border-color:#667eea}
 <div class="tab-nav">
 <button class="tab-btn active" onclick="switchTab('status')">Status</button>
 <button class="tab-btn" onclick="switchTab('mitm')">MITM</button>
-<button class="tab-btn" onclick="switchTab('evilginx')">Evilginx <span id="evilginxBadge" class="badge">0</span></button>
 <button class="tab-btn" onclick="switchTab('loot')">Loot <span id="lootBadge" class="badge">0</span></button>
 </div>
 <div id="statusTab" class="tab-content active">
@@ -3700,76 +3848,6 @@ input[type="text"]:focus{outline:none;border-color:#667eea}
 <button class="btn btn-danger" onclick="clearRules()" style="margin-top:15px">Clear All Rules</button>
 </div>
 
-<!-- EVILGINX TAB -->
-<div id="evilginxTab" class="tab-content">
-<div class="status-header">
-<h2>Evilginx2 - Microsoft Cookie Capture</h2>
-<div id="evilginxBadge2" class="status-badge inactive">
-<span class="status-indicator inactive"></span>
-<span>Inactive</span>
-</div>
-</div>
-
-<div class="info-box">
-<h4>Evilginx2 - OAuth Token & Cookie Harvester</h4>
-<p>Captures Microsoft 365 authentication tokens and session cookies, including MFA bypass.</p>
-<p><strong>Setup:</strong> DNS must point victim to this device, or use local DNS poisoning.</p>
-</div>
-
-<div id="evilginxNotInstalled" style="display:none;background:#ffe7e7;padding:20px;border-radius:8px;margin:15px 0;border-left:4px solid #e74c3c">
-<h3 style="color:#e74c3c;margin-bottom:15px">WARNING: Evilginx2 Not Installed</h3>
-<p style="margin-bottom:15px">Evilginx2 is required for OAuth token and cookie capture.</p>
-<button class="btn btn-start" onclick="installEvilginx()" style="margin-top:10px">Install Evilginx2 Now</button>
-<p style="margin-top:15px;font-size:.9em;color:#999">Installation takes 5-10 minutes (includes Go compiler build)</p>
-</div>
-
-<div id="evilginxInfo" style="display:none;background:#e7f3ff;padding:20px;border-radius:8px;margin:15px 0">
-<h3 style="color:#0066cc;margin-bottom:15px">Active Phishing</h3>
-<p style="margin:8px 0"><strong>Phishlet:</strong> <code id="evilginxPhishlet" style="background:#fff;padding:4px 8px;border-radius:4px">-</code></p>
-<p style="margin:8px 0"><strong>Lure URL:</strong> <code id="evilginxLure" style="background:#fff;padding:4px 8px;border-radius:4px;font-size:.85em">-</code></p>
-<p style="margin:8px 0"><strong>Bridge IP:</strong> <code style="background:#fff;padding:4px 8px;border-radius:4px">10.200.66.1</code></p>
-<p style="margin-top:15px;font-size:.9em;color:#0066cc">Send victims to the lure URL. Captured sessions appear below.</p>
-</div>
-
-<h3 style="margin:20px 0 15px 0">Microsoft Phishlet Selection</h3>
-<div class="grid" style="margin-bottom:20px">
-<div class="card" style="border-left-color:#0078d4">
-<div class="card-title">Microsoft 365</div>
-<div style="font-size:.9em;color:#666;margin-top:8px">Outlook, SharePoint, Teams, OneDrive</div>
-<div style="margin-top:10px;font-size:.85em;color:#0078d4">Phishlet: o365</div>
-</div>
-<div class="card" style="border-left-color:#0072c6">
-<div class="card-title">Outlook.com</div>
-<div style="font-size:.9em;color:#666;margin-top:8px">Personal Outlook accounts</div>
-<div style="margin-top:10px;font-size:.85em;color:#0072c6">Phishlet: outlook</div>
-</div>
-</div>
-
-<h3 style="margin:20px 0 15px 0">Domain Configuration (Optional)</h3>
-<p style="margin-bottom:15px;color:#666">Leave empty for default (o365.local) or enter custom domain</p>
-<input type="text" id="evilginxDomain" placeholder="e.g., login-microsoft.com">
-
-<div class="button-group">
-<button id="btnStartO365" class="btn btn-start" onclick="startEvilginx('o365')">Start O365</button>
-<button id="btnStartOutlook" class="btn btn-start" onclick="startEvilginx('outlook')">Start Outlook</button>
-<button id="btnStopEvilginx" class="btn btn-stop" onclick="stopEvilginx()" disabled>Stop Evilginx</button>
-</div>
-
-<h3 style="margin:25px 0 15px 0">Captured Sessions</h3>
-<div id="evilginxSessions" class="logs-section" style="max-height:500px">
-<div style="color:#999;text-align:center;padding:40px">
-<div style="font-size:3em;margin-bottom:15px">[ ]</div>
-<p>No sessions captured yet</p>
-<p style="margin-top:10px;font-size:.9em">Start Evilginx and send victims to lure URL</p>
-</div>
-</div>
-
-<div class="button-group" style="margin-top:20px">
-<button class="btn btn-refresh" onclick="fetchStatus()">Refresh Sessions</button>
-<button class="btn btn-download" onclick="exportSessions()">Export Sessions (JSON)</button>
-<button class="btn btn-danger" onclick="clearSessions()">Clear All Sessions</button>
-</div>
-</div>
 
 <div id="lootTab" class="tab-content">
 <h2 style="margin-bottom:20px;color:#667eea">PCredz Analysis Output</h2>
@@ -3884,88 +3962,6 @@ rulesDiv.innerHTML='<p style="color:#999;text-align:center;padding:20px">No acti
 }
 }
 }
-if(data.evilginx){
-const evilBadge=document.getElementById("evilginxBadge");
-const evilBadge2=document.getElementById("evilginxBadge2");
-const running=data.evilginx.running;
-const installed=data.evilginx.installed;
-const sessCount=data.evilginx.sessions_count||0;
-if(evilBadge)evilBadge.textContent=sessCount;
-if(evilBadge2){
-evilBadge2.className="status-badge "+(running?"active":"inactive");
-evilBadge2.innerHTML='<span class="status-indicator '+(running?"active":"inactive")+'"></span><span>'+(running?"Running":"Inactive")+'</span>';
-}
-const statusCard=document.getElementById("evilginxStatusCard");
-const installStatusEl=document.getElementById("evilginxInstallStatus");
-const pathEl=document.getElementById("evilginxPath");
-const btnInstall=document.getElementById("btnInstallEvilginx");
-if(statusCard){
-if(installed){
-statusCard.style.borderLeftColor="#27ae60";
-if(installStatusEl)installStatusEl.innerHTML='<span style="color:#27ae60">Installed</span>';
-if(pathEl)pathEl.textContent=data.evilginx.install_path||'/opt/evilginx2/evilginx';
-if(btnInstall)btnInstall.style.display="none";
-}else{
-statusCard.style.borderLeftColor="#e74c3c";
-if(installStatusEl)installStatusEl.innerHTML='<span style="color:#e74c3c">Not Installed</span>';
-if(pathEl)pathEl.textContent="Click below to install";
-if(btnInstall)btnInstall.style.display="block";
-}
-}
-const btnStartO365=document.getElementById("btnStartO365");
-const btnStartOutlook=document.getElementById("btnStartOutlook");
-const btnStopEvil=document.getElementById("btnStopEvilginx");
-const evilNotInstalled=document.getElementById("evilginxNotInstalled");
-const evilInfo=document.getElementById("evilginxInfo");
-if(!installed){
-if(btnStartO365)btnStartO365.disabled=true;
-if(btnStartOutlook)btnStartOutlook.disabled=true;
-if(btnStopEvil)btnStopEvil.disabled=true;
-if(evilNotInstalled)evilNotInstalled.style.display="block";
-if(evilInfo)evilInfo.style.display="none";
-}else{
-if(btnStartO365)btnStartO365.disabled=running;
-if(btnStartOutlook)btnStartOutlook.disabled=running;
-if(btnStopEvil)btnStopEvil.disabled=!running;
-if(evilNotInstalled)evilNotInstalled.style.display="none";
-if(evilInfo){
-if(running&&data.evilginx.lure_url){
-evilInfo.style.display="block";
-const phishEl=document.getElementById("evilginxPhishlet");
-const lureEl=document.getElementById("evilginxLure");
-if(phishEl)phishEl.textContent=data.evilginx.phishlet||"Unknown";
-if(lureEl)lureEl.textContent=data.evilginx.lure_url||"Unknown";
-}else{
-evilInfo.style.display="none";
-}
-}
-}
-const sessDiv=document.getElementById("evilginxSessions");
-if(sessDiv){
-if(data.evilginx.sessions&&data.evilginx.sessions.length>0){
-var sessHTML='';
-for(var i=0;i<data.evilginx.sessions.length;i++){
-var s=data.evilginx.sessions[i];
-sessHTML+='<div style="background:#fff;margin:10px 0;padding:15px;border-radius:8px;border-left:4px solid #28a745">';
-sessHTML+='<div style="display:flex;justify-content:space-between;margin-bottom:10px">';
-sessHTML+='<strong style="color:#28a745">Session #'+(i+1)+'</strong>';
-sessHTML+='<span style="color:#999;font-size:.85em">'+new Date(s.timestamp).toLocaleString()+'</span>';
-sessHTML+='</div>';
-sessHTML+='<div style="margin:8px 0;font-size:.95em"><strong>Username:</strong> <code style="background:#f0f0f0;padding:2px 6px;border-radius:3px">'+(s.username||'N/A')+'</code></div>';
-sessHTML+='<div style="margin:8px 0;font-size:.95em"><strong>Phishlet:</strong> '+(s.phishlet||'N/A')+'</div>';
-sessHTML+='<details style="margin-top:10px"><summary style="cursor:pointer;color:#0066cc">Show Cookies & Tokens</summary>';
-sessHTML+='<pre style="background:#f8f8f8;padding:10px;margin-top:8px;border-radius:4px;font-size:.8em;overflow-x:auto;max-height:200px">'+escapeHtml(s.cookies||'No cookies')+'</pre>';
-sessHTML+='<pre style="background:#f8f8f8;padding:10px;margin-top:8px;border-radius:4px;font-size:.8em;overflow-x:auto;max-height:200px">'+escapeHtml(s.tokens||'No tokens')+'</pre>';
-sessHTML+='</details></div>';
-}
-sessDiv.innerHTML=sessHTML;
-}else if(running){
-sessDiv.innerHTML='<div style="color:#999;text-align:center;padding:40px"><div style="font-size:3em;margin-bottom:15px">...</div><p>Waiting for victims...</p><p style="margin-top:10px;font-size:.9em">Share lure URL with targets</p></div>';
-}else{
-sessDiv.innerHTML='<div style="color:#999;text-align:center;padding:40px"><div style="font-size:3em;margin-bottom:15px">...</div><p>No sessions captured yet</p><p style="margin-top:10px;font-size:.9em">Start Evilginx and send victims to lure URL</p></div>';
-}
-}
-}
 if(isActive){
 const captureFile=document.getElementById("captureFile");
 if(captureFile)captureFile.textContent=data.pcap_file?data.pcap_file.split("/").pop():"-";
@@ -4055,44 +4051,6 @@ async function enableMITM(){const remoteIP=document.getElementById("remoteIP").v
 async function disableMITM(){if(!confirm("Disable MITM and cleanup all rules?"))return;showAlert("Disabling MITM...","info");try{const res=await fetch("/api/mitm/disable",{method:"POST"});const data=await res.json();if(data.success){showAlert("MITM disabled","success");setTimeout(fetchStatus,1000)}}catch(err){showAlert("Error: "+err.message,"error")}}
 async function interceptCategory(category){const destination=document.getElementById("remoteIP").value.trim()?'remote':'local';const target=destination==='remote'?document.getElementById("remoteIP").value:'bridge IP';if(!confirm("Intercept "+category+" traffic?\n\nDestination: "+target))return;showAlert("Adding "+category+" intercept rules...","info");try{const res=await fetch("/api/mitm/intercept",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({category:category,destination:destination})});const data=await res.json();if(data.success){showAlert(category+" interception enabled ("+data.rules_added+" rules)","success");setTimeout(fetchStatus,1000)}else{showAlert("Failed to add rules","error")}}catch(err){showAlert("Error: "+err.message,"error")}}
 async function clearRules(){if(!confirm("Remove all intercept rules?"))return;try{const res=await fetch("/api/mitm/clear_rules",{method:"POST"});if(res.ok){showAlert("Rules cleared","success");setTimeout(fetchStatus,1000)}}catch(err){showAlert("Error: "+err.message,"error")}}
-
-async function startEvilginx(phishlet){const domain=document.getElementById("evilginxDomain").value.trim();const msg=domain?"Start Evilginx with "+phishlet+" phishlet using domain "+domain+"?":"Start Evilginx with "+phishlet+" phishlet using default domain?";if(!confirm(msg))return;document.getElementById("btnStartO365").disabled=true;document.getElementById("btnStartOutlook").disabled=true;showAlert("Starting Evilginx ("+phishlet+")...","info");try{const body={phishlet:phishlet};if(domain)body.domain=domain;const res=await fetch("/api/evilginx/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const data=await res.json();if(data.success){showAlert("Evilginx started! Lure: "+data.lure_url,"success");setTimeout(fetchStatus,1000)}else{showAlert("Failed to start: "+(data.error||"Unknown error"),"error");document.getElementById("btnStartO365").disabled=false;document.getElementById("btnStartOutlook").disabled=false}}catch(err){showAlert("Error: "+err.message,"error");document.getElementById("btnStartO365").disabled=false;document.getElementById("btnStartOutlook").disabled=false}}
-
-async function stopEvilginx(){if(!confirm("Stop Evilginx? Captured sessions will be saved."))return;showAlert("Stopping Evilginx...","info");try{const res=await fetch("/api/evilginx/stop",{method:"POST"});const data=await res.json();if(data.success){showAlert("Evilginx stopped","success");setTimeout(fetchStatus,1000)}}catch(err){showAlert("Error: "+err.message,"error")}}
-
-async function clearSessions(){if(!confirm("Clear all captured sessions?"))return;try{const res=await fetch("/api/evilginx/clear_sessions",{method:"POST"});if(res.ok){showAlert("Sessions cleared","success");setTimeout(fetchStatus,1000)}}catch(err){showAlert("Error: "+err.message,"error")}}
-
-function exportSessions(){window.location.href="/api/evilginx/sessions"}
-
-async function installEvilginx(){
-if(!confirm("Install Evilginx2?\n\nThis will:\n- Install Go compiler\n- Clone Evilginx2 repository\n- Build from source\n- Configure permissions\n\nThis may take 5-10 minutes."))return;
-const btn=document.getElementById("btnInstallEvilginx");
-if(btn){
-btn.disabled=true;
-btn.textContent="Installing...";
-}
-showAlert("Installing Evilginx2... This may take several minutes. Check logs for progress.","info");
-try{
-const res=await fetch("/api/evilginx/install",{method:"POST"});
-const data=await res.json();
-if(data.success){
-showAlert("Evilginx2 installed successfully! Path: "+data.path,"success");
-setTimeout(fetchStatus,2000);
-}else{
-showAlert("Installation failed: "+(data.error||"Unknown error"),"error");
-if(btn){
-btn.disabled=false;
-btn.textContent="Install Evilginx";
-}
-}
-}catch(err){
-showAlert("Installation error: "+err.message,"error");
-if(btn){
-btn.disabled=false;
-btn.textContent="Install Evilginx";
-}
-}
-}
 
 // Wait for DOM to be fully loaded before attaching event listeners
 console.log('Setting up DOMContentLoaded handler');
@@ -4198,8 +4156,6 @@ def main():
                 bridge_manager.stop_capture()
             if bridge_manager.mitm_manager.enabled:
                 bridge_manager.mitm_manager.cleanup()
-            if bridge_manager.evilginx_manager and bridge_manager.evilginx_manager.running:
-                bridge_manager.evilginx_manager.stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -4248,8 +4204,6 @@ Press Ctrl+C to stop
                 bridge_manager.stop_capture()
                 if bridge_manager.mitm_manager.enabled:
                     bridge_manager.mitm_manager.cleanup()
-                if bridge_manager.evilginx_manager and bridge_manager.evilginx_manager.running:
-                    bridge_manager.evilginx_manager.stop()
         httpd.shutdown()
         return 0
 

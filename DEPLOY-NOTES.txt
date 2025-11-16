@@ -7,7 +7,6 @@ To deploy NAC-Tap to your target device:
    ✓ nac-tap.py
    ✓ test-webui.html
    ✓ install-dependencies.sh
-   ✓ install-evilginx.sh (optional)
    ✓ setup-wifi-ap.sh (optional)
 
 2. DEPLOYMENT STEPS:
@@ -46,12 +45,7 @@ To deploy NAC-Tap to your target device:
    - Works in ANY directory
    - Just keep all files together in same folder
 
-6. OPTIONAL - Install Evilginx:
-   
-   cd /opt/nac-tap
-   sudo ./install-evilginx.sh
-
-7. OPTIONAL - Setup WiFi AP:
+6. OPTIONAL - Setup WiFi AP:
    
    cd /opt/nac-tap
    sudo ./setup-wifi-ap.sh
