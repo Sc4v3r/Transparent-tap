@@ -4,7 +4,8 @@
 # Run as root: sudo bash install-dependencies.sh
 #
 
-set -e
+# Don't exit on error - we'll handle failures gracefully
+set +e
 
 echo "========================================"
 echo "NAC Bridge Monitor - Installing Dependencies"
@@ -37,7 +38,8 @@ if [ "$OS" = "debian" ]; then
     # Update package list
     apt-get update
     
-    # Install required packages
+    # Core packages (required)
+    echo "Installing core packages..."
     apt-get install -y \
         python3 \
         python3-pip \
@@ -52,19 +54,62 @@ if [ "$OS" = "debian" ]; then
         iptables \
         ebtables \
         libpcap-dev \
-        file \
-        wpa_supplicant \
-        wireless-tools \
-        isc-dhcp-client
+        file
+    
+    # WiFi packages (may have different names or already be installed)
+    echo "Installing WiFi packages..."
+    INSTALLED_WIFI=0
+    
+    # Try wpa_supplicant (standard name)
+    if apt-get install -y wpa_supplicant 2>/dev/null; then
+        INSTALLED_WIFI=1
+    else
+        # Check if already installed
+        if command -v wpa_supplicant >/dev/null 2>&1; then
+            echo "✓ wpa_supplicant already installed"
+            INSTALLED_WIFI=1
+        else
+            echo "⚠️  wpa_supplicant not found in repositories, but may already be installed"
+        fi
+    fi
+    
+    # Try wireless-tools (may be obsolete, replaced by iw)
+    if apt-get install -y wireless-tools 2>/dev/null; then
+        echo "✓ wireless-tools installed"
+    else
+        # Check if iw is available (modern replacement)
+        if command -v iw >/dev/null 2>&1; then
+            echo "✓ iw available (modern replacement for wireless-tools)"
+        else
+            echo "⚠️  wireless-tools not found, installing iw instead"
+            apt-get install -y iw 2>/dev/null || true
+        fi
+    fi
+    
+    # Try isc-dhcp-client (may be named differently)
+    if apt-get install -y isc-dhcp-client 2>/dev/null; then
+        echo "✓ isc-dhcp-client installed"
+    else
+        # Try alternative names
+        if apt-get install -y dhcp-client 2>/dev/null; then
+            echo "✓ dhcp-client installed"
+        elif command -v dhclient >/dev/null 2>&1; then
+            echo "✓ dhclient already available"
+        else
+            echo "⚠️  DHCP client not found, but may already be installed"
+        fi
+    fi
     
     echo ""
     echo "✓ Debian/Ubuntu packages installed"
     
 elif [ "$OS" = "redhat" ]; then
     # Install required packages
+    echo "Installing core packages..."
     yum install -y \
         python3 \
         python3-pip \
+        python3-venv \
         git \
         tcpdump \
         iproute \
@@ -76,8 +121,24 @@ elif [ "$OS" = "redhat" ]; then
         ebtables \
         libpcap-devel \
         file \
-        wpa_supplicant \
         dhclient
+    
+    # Try wpa_supplicant
+    echo "Installing WiFi packages..."
+    if yum install -y wpa_supplicant 2>/dev/null; then
+        echo "✓ wpa_supplicant installed"
+    elif command -v wpa_supplicant >/dev/null 2>&1; then
+        echo "✓ wpa_supplicant already installed"
+    else
+        echo "⚠️  wpa_supplicant not found, but may already be installed"
+    fi
+    
+    # Try iw (modern wireless tools)
+    if yum install -y iw 2>/dev/null; then
+        echo "✓ iw installed"
+    elif command -v iw >/dev/null 2>&1; then
+        echo "✓ iw already installed"
+    fi
     
     echo ""
     echo "✓ RedHat/CentOS packages installed"
@@ -98,6 +159,37 @@ for tool in python3 tcpdump ip bridge ethtool capinfos tail iptables ebtables; d
         MISSING="$MISSING $tool"
     fi
 done
+
+# Verify WiFi tools (optional but recommended)
+echo ""
+echo "Verifying WiFi tools..."
+WIFI_TOOLS_OK=1
+for tool in wpa_supplicant; do
+    if command -v $tool >/dev/null 2>&1; then
+        echo "✓ $tool: $(command -v $tool)"
+    else
+        echo "⚠️  $tool: NOT FOUND (WiFi client features may not work)"
+        WIFI_TOOLS_OK=0
+    fi
+done
+
+# Check for iw or iwconfig (wireless tools)
+if command -v iw >/dev/null 2>&1; then
+    echo "✓ iw: $(command -v iw)"
+elif command -v iwconfig >/dev/null 2>&1; then
+    echo "✓ iwconfig: $(command -v iwconfig)"
+else
+    echo "⚠️  Wireless tools (iw/iwconfig): NOT FOUND (WiFi scanning may not work)"
+fi
+
+# Check for DHCP client
+if command -v dhclient >/dev/null 2>&1; then
+    echo "✓ dhclient: $(command -v dhclient)"
+elif command -v dhcpcd >/dev/null 2>&1; then
+    echo "✓ dhcpcd: $(command -v dhcpcd)"
+else
+    echo "⚠️  DHCP client: NOT FOUND (WiFi client DHCP may not work)"
+fi
 
 echo ""
 echo "Creating directories..."
@@ -202,7 +294,7 @@ fi
 
 echo ""
 echo "Next steps:"
-echo "  1. (Optional) Setup Wi-Fi Management AP:"
+echo "  1. Setup Wi-Fi Management AP (required):"
 echo "     sudo bash setup-wifi-ap.sh"
 echo ""
 echo "  2. Start NAC-Tap:"
