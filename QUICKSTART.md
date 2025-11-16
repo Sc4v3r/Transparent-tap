@@ -1,5 +1,7 @@
 # NAC Tap - Quick Start Guide
 
+> **New to NAC-Tap?** Start with **[SETUP.md](SETUP.md)** for complete installation instructions.
+
 ## Initial Setup (First Time Only)
 
 ### 1. Install System Dependencies

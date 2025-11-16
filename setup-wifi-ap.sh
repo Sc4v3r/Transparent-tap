@@ -14,6 +14,9 @@ echo "NAC Tap - Wi-Fi AP Setup"
 echo "Management Interface Configuration"
 echo "========================================"
 echo ""
+echo "NOTE: This script should be run AFTER installing dependencies:"
+echo "      sudo bash install-dependencies.sh"
+echo ""
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then

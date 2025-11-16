@@ -1,4 +1,31 @@
-# NAC Bridge Monitor - Installation Guide
+# NAC-Tap - Network Access Control Transparent Tap
+
+A transparent Layer 2 network bridge with packet capture, MITM attack capabilities, and credential extraction for penetration testing engagements.
+
+## Quick Start
+
+**For complete setup instructions, see [SETUP.md](SETUP.md)**
+
+```bash
+# 1. Install dependencies
+sudo bash install-dependencies.sh
+
+# 2. Setup Wi-Fi management AP (optional)
+sudo bash setup-wifi-ap.sh
+
+# 3. Start NAC-Tap
+sudo python3 nac-tap.py
+
+# 4. Access web interface
+# http://172.31.250.1:8080 (via Wi-Fi) or http://localhost:8080
+```
+
+## Documentation
+
+- **[SETUP.md](SETUP.md)** - Complete setup guide (start here!)
+- **[QUICKSTART.md](QUICKSTART.md)** - Quick usage guide
+- **[MITM-FEATURES.md](MITM-FEATURES.md)** - MITM attack techniques
+- **[PENTEST-PLAYBOOK.md](PENTEST-PLAYBOOK.md)** - Penetration testing workflows
 
 ## System Requirements
 
@@ -94,18 +121,18 @@ which tcpdump ip bridge ethtool capinfos tail
 sudo python3 -c "import os; print('✓ Root check OK' if os.geteuid() == 0 else '✗ Not root')"
 ```
 
-## Running the Script
+## Running NAC-Tap
 
 ```bash
-# Make script executable (optional)
-chmod +x script.py
-
 # Run with root privileges
-sudo python3 script.py
+sudo python3 nac-tap.py
 
 # Access web interface
-# Open browser to: http://localhost:8080
+# Via Wi-Fi AP: http://172.31.250.1:8080
+# Via localhost: http://localhost:8080
 ```
+
+**For detailed setup and usage instructions, see [SETUP.md](SETUP.md)**
 
 ## Systemd Service (Optional)
 
