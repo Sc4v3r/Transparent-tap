@@ -1312,43 +1312,132 @@ class WiFiManager:
     def _start_wpa_supplicant(self, interface, config_file):
         """Start wpa_supplicant daemon and wait for association"""
         try:
+            # Check if interface exists
+            result = run_cmd(['ip', 'link', 'show', interface], check=False)
+            if not result or result.returncode != 0:
+                log(f"Interface {interface} does not exist", 'ERROR')
+                return False
+            
+            # Check if interface is wireless
+            if not os.path.exists(f"/sys/class/net/{interface}/wireless"):
+                log(f"Interface {interface} is not a wireless interface", 'ERROR')
+                return False
+            
             # Kill any existing wpa_supplicant for this interface
             run_cmd(['pkill', '-f', f'wpa_supplicant.*-i.*{interface}'], check=False)
             time.sleep(1)
             
-            # Bring interface up
-            run_cmd(['ip', 'link', 'set', interface, 'up'], check=False)
+            # Unblock interface if it's blocked (rfkill)
+            run_cmd(['rfkill', 'unblock', 'wifi'], check=False)
+            run_cmd(['rfkill', 'unblock', 'all'], check=False)
             time.sleep(1)
             
-            # Start wpa_supplicant
+            # Bring interface down first to reset state
+            run_cmd(['ip', 'link', 'set', interface, 'down'], check=False)
+            time.sleep(1)
+            
+            # Bring interface up
+            result = run_cmd(['ip', 'link', 'set', interface, 'up'], check=False)
+            if result and result.returncode != 0:
+                log(f"Failed to bring interface {interface} up: {result.stderr}", 'ERROR')
+                return False
+            time.sleep(2)
+            
+            # Check interface state
+            result = run_cmd(['ip', 'link', 'show', interface], check=False)
+            if result and 'state UP' not in result.stdout:
+                log(f"Interface {interface} is not UP after bringing it up", 'ERROR')
+                return False
+            
+            # Start wpa_supplicant with verbose logging
             pid_file = f"/var/run/wpa_supplicant-{interface}.pid"
+            log_file = f"/tmp/wpa_supplicant-{interface}.log"
+            
+            # Try to detect wireless driver
+            driver = 'nl80211'  # Default modern driver
+            result = run_cmd(['iw', 'dev', interface, 'info'], check=False)
+            if result and result.returncode == 0:
+                # Check if we can use nl80211
+                if 'nl80211' in result.stdout or 'phy' in result.stdout:
+                    driver = 'nl80211'
+                else:
+                    driver = 'wext'  # Fallback to older driver
+            
+            log(f"Starting wpa_supplicant with driver {driver} on {interface}...", 'INFO')
+            
+            # Start wpa_supplicant with debug logging
             result = run_cmd([
                 'wpa_supplicant', '-B', '-i', interface,
-                '-c', config_file, '-P', pid_file
+                '-c', config_file, '-P', pid_file,
+                '-D', driver, '-f', log_file, '-dd'
             ], timeout=10)
             
             if result and result.returncode == 0:
-                log(f"wpa_supplicant started for {interface}", 'INFO')
+                log(f"wpa_supplicant started for {interface} (PID file: {pid_file})", 'INFO')
+                
+                # Wait a moment for it to initialize
+                time.sleep(3)
+                
+                # Check if process is actually running
+                if os.path.exists(pid_file):
+                    try:
+                        with open(pid_file, 'r') as f:
+                            pid = int(f.read().strip())
+                        # Check if process exists
+                        result = run_cmd(['ps', '-p', str(pid)], check=False)
+                        if not result or result.returncode != 0:
+                            log(f"wpa_supplicant process not running (PID {pid})", 'ERROR')
+                            # Check log file for errors
+                            if os.path.exists(log_file):
+                                with open(log_file, 'r') as f:
+                                    log_content = f.read()
+                                    if log_content:
+                                        log(f"wpa_supplicant log: {log_content[-500:]}", 'ERROR')
+                            return False
+                    except Exception as e:
+                        log(f"Error checking wpa_supplicant PID: {e}", 'WARNING')
                 
                 # Wait for association (poll up to 30 seconds)
                 max_wait = 30
                 waited = 0
                 while waited < max_wait:
                     result = run_cmd(['iw', 'dev', interface, 'link'], check=False)
-                    if result and result.returncode == 0 and 'Connected' in result.stdout:
-                        log(f"WiFi associated to network on {interface}", 'SUCCESS')
-                        return True
+                    if result and result.returncode == 0:
+                        if 'Connected' in result.stdout or 'SSID:' in result.stdout:
+                            log(f"WiFi associated to network on {interface}", 'SUCCESS')
+                            return True
+                        # Also check wpa_supplicant status
+                        result_wpa = run_cmd(['wpa_cli', '-i', interface, 'status'], check=False)
+                        if result_wpa and 'wpa_state=COMPLETED' in result_wpa.stdout:
+                            log(f"WiFi associated to network on {interface} (via wpa_cli)", 'SUCCESS')
+                            return True
                     time.sleep(2)
                     waited += 2
                 
                 log(f"WiFi association timeout after {max_wait} seconds", 'WARNING')
+                # Check log file for errors
+                if os.path.exists(log_file):
+                    with open(log_file, 'r') as f:
+                        log_content = f.read()
+                        if log_content:
+                            log(f"wpa_supplicant log (last 500 chars): {log_content[-500:]}", 'ERROR')
                 return False
             else:
-                error = result.stderr if result else "Unknown error"
-                log(f"Failed to start wpa_supplicant: {error}", 'ERROR')
+                error_msg = "Unknown error"
+                if result:
+                    error_msg = result.stderr if result.stderr else result.stdout if result.stdout else f"Exit code: {result.returncode}"
+                log(f"Failed to start wpa_supplicant: {error_msg}", 'ERROR')
+                # Check log file if it exists
+                if os.path.exists(log_file):
+                    with open(log_file, 'r') as f:
+                        log_content = f.read()
+                        if log_content:
+                            log(f"wpa_supplicant log: {log_content[-500:]}", 'ERROR')
                 return False
         except Exception as e:
             log(f"wpa_supplicant start error: {e}", 'ERROR')
+            import traceback
+            log(traceback.format_exc(), 'ERROR')
             return False
     
     def _create_systemd_network_config(self, interface):
