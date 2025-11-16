@@ -212,6 +212,6 @@ echo "  3. Access web interface:"
 echo "     Via Wi-Fi AP: http://172.31.250.1:8080"
 echo "     Via localhost: http://localhost:8080"
 echo ""
-echo "For complete setup instructions, see SETUP.md"
+echo "For complete setup instructions, see README.md"
 echo ""
 
