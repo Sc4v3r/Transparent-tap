@@ -78,27 +78,15 @@ To verify Python version:
 python3 --version  # Should be 3.7 or higher
 ```
 
-## Optional: PCredz Installation
+## PCredz Installation
 
-For automatic credential extraction from PCAP files:
+PCredz is **automatically installed** during dependency installation for automatic credential extraction from PCAP files. It's installed in a Python virtual environment at `/opt/PCredz/venv`.
 
-```bash
-# Clone PCredz
-sudo git clone https://github.com/lgandx/PCredz.git /opt/PCredz
+**Location:** `/opt/PCredz`  
+**Wrapper:** `/opt/PCredz/pcredz-wrapper.sh`  
+**Virtual Environment:** `/opt/PCredz/venv`
 
-# Install PCredz dependencies
-cd /opt/PCredz
-sudo pip3 install -r requirements.txt
-
-# Create wrapper script
-sudo tee /opt/PCredz/pcredz-wrapper.sh > /dev/null << 'EOF'
-#!/bin/bash
-cd /opt/PCredz
-python3 Pcredz "$@"
-EOF
-
-sudo chmod +x /opt/PCredz/pcredz-wrapper.sh
-```
+If installation fails, see [SETUP.md](SETUP.md) troubleshooting section for manual installation.
 
 ## Directory Setup
 

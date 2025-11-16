@@ -104,27 +104,15 @@ ip addr show wlan0
 
 ---
 
-### Step 3: Optional - Install PCredz (Credential Extraction)
+### Step 3: PCredz Installation (Automatic)
 
-PCredz automatically extracts credentials (NTLM hashes, passwords, etc.) from PCAP files:
+PCredz is **automatically installed** during dependency installation (`install-dependencies.sh`). It extracts credentials (NTLM hashes, passwords, etc.) from PCAP files.
 
-```bash
-# Clone PCredz
-sudo git clone https://github.com/lgandx/PCredz.git /opt/PCredz
-
-# Install PCredz dependencies
-cd /opt/PCredz
-sudo pip3 install -r requirements.txt
-
-# Create wrapper script
-sudo tee /opt/PCredz/pcredz-wrapper.sh > /dev/null << 'EOF'
-#!/bin/bash
-cd /opt/PCredz
-python3 Pcredz "$@"
-EOF
-
-sudo chmod +x /opt/PCredz/pcredz-wrapper.sh
-```
+**What gets installed:**
+- PCredz cloned to `/opt/PCredz`
+- Python virtual environment at `/opt/PCredz/venv`
+- Dependencies installed in the virtual environment
+- Wrapper script at `/opt/PCredz/pcredz-wrapper.sh`
 
 **Verification:**
 ```bash
@@ -132,7 +120,7 @@ sudo chmod +x /opt/PCredz/pcredz-wrapper.sh
 sudo /opt/PCredz/pcredz-wrapper.sh --help
 ```
 
-**Note:** PCredz is optional. The NAC-Tap will work without it, but you won't get automatic credential extraction.
+**Note:** If PCredz installation fails during dependency installation, you can install it manually (see troubleshooting section).
 
 ---
 
@@ -370,6 +358,38 @@ resolvectl status
 # Check routing
 ip route show
 ```
+
+### PCredz Installation Issues
+
+If PCredz wasn't installed automatically:
+
+```bash
+# Check if PCredz directory exists
+ls -la /opt/PCredz
+
+# Manual installation
+sudo git clone https://github.com/lgandx/PCredz.git /opt/PCredz
+cd /opt/PCredz
+sudo python3 -m venv venv
+sudo venv/bin/pip install --upgrade pip
+sudo venv/bin/pip install -r requirements.txt
+
+# Create wrapper script
+sudo tee /opt/PCredz/pcredz-wrapper.sh > /dev/null << 'EOF'
+#!/bin/bash
+cd /opt/PCredz
+/opt/PCredz/venv/bin/python3 Pcredz "$@"
+EOF
+sudo chmod +x /opt/PCredz/pcredz-wrapper.sh
+
+# Test installation
+sudo /opt/PCredz/pcredz-wrapper.sh --help
+```
+
+**Common issues:**
+- **Git not installed**: Install with `sudo apt-get install git` (Debian) or `sudo yum install git` (RedHat)
+- **Virtual environment fails**: The script will fall back to system Python
+- **Requirements.txt missing**: Check PCredz repository for correct branch/tag
 
 ---
 

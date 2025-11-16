@@ -41,6 +41,8 @@ if [ "$OS" = "debian" ]; then
     apt-get install -y \
         python3 \
         python3-pip \
+        python3-venv \
+        git \
         tcpdump \
         iproute2 \
         bridge-utils \
@@ -58,6 +60,7 @@ elif [ "$OS" = "redhat" ]; then
     yum install -y \
         python3 \
         python3-pip \
+        git \
         tcpdump \
         iproute \
         bridge-utils \
@@ -103,9 +106,92 @@ else
 fi
 echo "========================================"
 echo ""
-echo "Optional: Install PCredz for credential extraction"
-echo "  git clone https://github.com/lgandx/PCredz.git /opt/PCredz"
-echo "  cd /opt/PCredz && pip3 install -r requirements.txt"
+
+# Install PCredz with virtual environment
+echo "Installing PCredz for credential extraction..."
+echo ""
+
+PCREDZ_DIR="/opt/PCredz"
+PCREDZ_WRAPPER="$PCREDZ_DIR/pcredz-wrapper.sh"
+
+if [ -d "$PCREDZ_DIR" ]; then
+    echo "⚠️  PCredz directory already exists at $PCREDZ_DIR"
+    echo "   Skipping PCredz installation. To reinstall, remove the directory first."
+else
+    # Check if git is available
+    if ! command -v git >/dev/null 2>&1; then
+        echo "⚠️  git not found - skipping PCredz installation"
+        echo "   Install git manually and run: git clone https://github.com/lgandx/PCredz.git $PCREDZ_DIR"
+    else
+        echo "Cloning PCredz repository..."
+        if git clone https://github.com/lgandx/PCredz.git "$PCREDZ_DIR" 2>&1; then
+            echo "✓ PCredz cloned successfully"
+            
+            # Create virtual environment
+            echo "Creating Python virtual environment..."
+            if python3 -m venv "$PCREDZ_DIR/venv" 2>&1; then
+                echo "✓ Virtual environment created"
+                
+                # Activate venv and install requirements
+                echo "Installing PCredz dependencies in virtual environment..."
+                if [ -f "$PCREDZ_DIR/requirements.txt" ]; then
+                    if "$PCREDZ_DIR/venv/bin/pip" install --upgrade pip >/dev/null 2>&1 && \
+                       "$PCREDZ_DIR/venv/bin/pip" install -r "$PCREDZ_DIR/requirements.txt" >/dev/null 2>&1; then
+                        echo "✓ PCredz dependencies installed"
+                    else
+                        echo "⚠️  Failed to install PCredz dependencies"
+                        echo "   You may need to install them manually:"
+                        echo "   cd $PCREDZ_DIR && venv/bin/pip install -r requirements.txt"
+                    fi
+                else
+                    echo "⚠️  requirements.txt not found in PCredz repository"
+                fi
+                
+                # Create wrapper script that uses venv
+                echo "Creating PCredz wrapper script..."
+                cat > "$PCREDZ_WRAPPER" << 'EOF'
+#!/bin/bash
+# PCredz wrapper script - uses virtual environment
+cd /opt/PCredz
+/opt/PCredz/venv/bin/python3 Pcredz "$@"
+EOF
+                chmod +x "$PCREDZ_WRAPPER"
+                echo "✓ Wrapper script created at $PCREDZ_WRAPPER"
+                
+                # Verify installation
+                if "$PCREDZ_WRAPPER" --help >/dev/null 2>&1; then
+                    echo "✅ PCredz installed and verified successfully!"
+                else
+                    echo "⚠️  PCredz installed but verification failed"
+                    echo "   You can test manually: $PCREDZ_WRAPPER --help"
+                fi
+            else
+                echo "⚠️  Failed to create virtual environment"
+                echo "   Falling back to system Python"
+                # Fallback: use system Python
+                if [ -f "$PCREDZ_DIR/requirements.txt" ]; then
+                    echo "Installing PCredz dependencies (system Python)..."
+                    if pip3 install -r "$PCREDZ_DIR/requirements.txt" >/dev/null 2>&1; then
+                        echo "✓ PCredz dependencies installed (system Python)"
+                    fi
+                fi
+                # Create wrapper without venv
+                cat > "$PCREDZ_WRAPPER" << 'EOF'
+#!/bin/bash
+cd /opt/PCredz
+python3 Pcredz "$@"
+EOF
+                chmod +x "$PCREDZ_WRAPPER"
+                echo "✓ Wrapper script created (using system Python)"
+            fi
+        else
+            echo "⚠️  Failed to clone PCredz repository"
+            echo "   You can install it manually:"
+            echo "   git clone https://github.com/lgandx/PCredz.git $PCREDZ_DIR"
+        fi
+    fi
+fi
+
 echo ""
 echo "Next steps:"
 echo "  1. (Optional) Setup Wi-Fi Management AP:"
