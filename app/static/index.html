@@ -160,6 +160,10 @@ input[type="text"]:focus{outline:none;border-color:#667eea}
 <div>• <strong>Bridge:</strong> br0 - Transparent Layer 2 bridge</div>
 <div>• <strong>Bridge Member:</strong> eth0/eth1 - Ethernet interfaces in bridge mode</div>
 </div>
+<div id="wlan2Status" style="background:#e3f2fd;border-left:4px solid #2196f3;padding:15px;margin-bottom:15px;border-radius:5px;display:none">
+<h3 style="margin-bottom:10px;color:#1976d2">wlan2 Internet Connection</h3>
+<div id="wlan2StatusContent" style="color:#555;font-size:.9em"></div>
+</div>
 <div id="interfaces" class="interface-grid"></div>
 <div class="button-group">
 <button id="btnStart" class="btn btn-start">Start Capture</button>
@@ -480,6 +484,33 @@ const capturePackets=document.getElementById("capturePackets");
 if(capturePackets)capturePackets.textContent="0 packets";
 const captureDuration=document.getElementById("captureDuration");
 if(captureDuration)captureDuration.textContent="00:00:00";
+}
+if(data.wlan2){
+const wlan2Status=document.getElementById("wlan2Status");
+const wlan2Content=document.getElementById("wlan2StatusContent");
+if(wlan2Status&&wlan2Content){
+if(data.wlan2.connected){
+wlan2Status.style.display="block";
+var statusHTML='';
+statusHTML+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">';
+statusHTML+='<span style="width:12px;height:12px;border-radius:50%;background:'+(data.wlan2.internet_available?"#28a745":"#dc3545")+';display:inline-block"></span>';
+statusHTML+='<strong style="color:'+(data.wlan2.internet_available?"#155724":"#721c24")+'">Internet: '+(data.wlan2.internet_available?"Available":"Not Available")+'</strong>';
+statusHTML+='</div>';
+statusHTML+='<div style="margin:5px 0"><strong>SSID:</strong> '+(data.wlan2.ssid||"N/A")+'</div>';
+statusHTML+='<div style="margin:5px 0"><strong>Interface:</strong> '+(data.wlan2.interface||"wlan2")+'</div>';
+statusHTML+='<div style="margin:5px 0"><strong>IP Address:</strong> <span style="font-family:monospace">'+(data.wlan2.ip_address||"N/A")+'</span></div>';
+if(data.wlan2.gateway){
+statusHTML+='<div style="margin:5px 0"><strong>Gateway:</strong> <span style="font-family:monospace">'+(data.wlan2.gateway||"N/A")+'</span></div>';
+}
+if(data.wlan2.last_check){
+var lastCheck=new Date(data.wlan2.last_check);
+statusHTML+='<div style="margin:5px 0;color:#666;font-size:.85em"><strong>Last Check:</strong> '+lastCheck.toLocaleTimeString()+'</div>';
+}
+wlan2Content.innerHTML=statusHTML;
+}else{
+wlan2Status.style.display="none";
+}
+}
 }
 if(data.interfaces){
 const container=document.getElementById("interfaces");
