@@ -1,9 +1,9 @@
 [Unit]
 Description=NAC-Tap - Transparent Network Bridge Monitor
 Documentation=https://github.com/your-repo/nac-tap
-After=network-online.target hostapd.service dnsmasq.service
+After=network-online.target wlan0-up.service hostapd.service dnsmasq.service
 Wants=network-online.target
-Requires=hostapd.service
+Requires=hostapd.service wlan0-up.service
 
 [Service]
 Type=simple

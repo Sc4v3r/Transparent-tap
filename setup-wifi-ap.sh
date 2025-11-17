@@ -63,6 +63,32 @@ IPForward=yes
 EOF
 
 systemctl restart systemd-networkd
+
+# Create systemd service to bring up wlan0 on boot
+cat > /etc/systemd/system/wlan0-up.service <<'EOF'
+[Unit]
+Description=Bring up wlan0 interface for AP
+Before=hostapd.service
+After=network-online.target systemd-networkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Wait for interface to exist, then bring it up
+ExecStart=/bin/bash -c 'for i in {1..30}; do if [ -d /sys/class/net/wlan0 ]; then break; fi; sleep 1; done; ip link set wlan0 up || true'
+ExecStartPost=/bin/sleep 2
+# Verify interface is up
+ExecStartPost=/bin/bash -c 'ip link show wlan0 | grep -q "state UP" || (echo "Warning: wlan0 may not be UP" && exit 0)'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable wlan0-up.service
+systemctl start wlan0-up.service
+
+# Also bring it up now
 ip link set wlan0 up
 sleep 2
 
@@ -111,13 +137,45 @@ EOF
 
 # Configure hostapd to use our config file
 cat > /etc/default/hostapd <<EOF
+# Configuration file for hostapd
 DAEMON_CONF="/etc/hostapd/hostapd.conf"
+
+# Additional options (leave empty if not needed)
+DAEMON_OPTS=""
 EOF
 
 # Enable hostapd service (persistent across reboots)
+# Make sure it starts after wlan0 is up
 systemctl unmask hostapd
+
+# Modify hostapd service to wait for wlan0
+# Create override directory
+mkdir -p /etc/systemd/system/hostapd.service.d
+cat > /etc/systemd/system/hostapd.service.d/wait-for-wlan0.conf <<'EOF'
+[Unit]
+After=wlan0-up.service
+Requires=wlan0-up.service
+
+[Service]
+# Add a small delay to ensure wlan0 is fully up
+ExecStartPre=/bin/sleep 1
+EOF
+
+systemctl daemon-reload
 systemctl enable hostapd
-systemctl start hostapd
+systemctl enable wlan0-up.service
+
+# Start wlan0-up first, then hostapd
+systemctl start wlan0-up.service
+sleep 2
+# Verify wlan0 is up before starting hostapd
+if ip link show wlan0 | grep -q "state UP"; then
+    systemctl start hostapd
+    echo "✓ hostapd started"
+else
+    echo "⚠️  Warning: wlan0 is not UP, hostapd may fail"
+    systemctl start hostapd || echo "❌ hostapd failed to start"
+fi
 
 echo ""
 echo "========================================"

@@ -1,0 +1,14 @@
+[Unit]
+Description=Wait for wlan0 to be ready for hostapd
+Before=hostapd.service
+After=wlan0-up.service
+Requires=wlan0-up.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'for i in {1..10}; do if ip link show wlan0 | grep -q "state UP"; then exit 0; fi; sleep 1; done; exit 1'
+
+[Install]
+WantedBy=multi-user.target
+

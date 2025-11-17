@@ -1,0 +1,14 @@
+[Unit]
+Description=Bring up wlan0 interface for AP
+Before=hostapd.service
+After=network-online.target systemd-networkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'ip link set wlan0 up || true'
+ExecStartPost=/bin/sleep 2
+
+[Install]
+WantedBy=multi-user.target
+
