@@ -64,11 +64,11 @@ EOF
 
 systemctl restart systemd-networkd
 
-# Create systemd service to bring up wlan0 on boot
+# Create systemd service to bring up wlan0 on boot and ensure IP is assigned
 cat > /etc/systemd/system/wlan0-up.service <<'EOF'
 [Unit]
-Description=Bring up wlan0 interface for AP
-Before=hostapd.service
+Description=Bring up wlan0 interface for AP and assign IP
+Before=hostapd.service dnsmasq.service
 After=network-online.target systemd-networkd.service
 
 [Service]
@@ -76,7 +76,12 @@ Type=oneshot
 RemainAfterExit=yes
 # Wait for interface to exist, then bring it up
 ExecStart=/bin/bash -c 'for i in {1..30}; do if [ -d /sys/class/net/wlan0 ]; then break; fi; sleep 1; done; ip link set wlan0 up || true'
-ExecStartPost=/bin/sleep 2
+ExecStartPost=/bin/sleep 3
+# Wait for systemd-networkd to assign IP (it may take a moment)
+ExecStartPost=/bin/bash -c 'for i in {1..20}; do if ip addr show wlan0 | grep -q "172.31.250.1"; then exit 0; fi; sleep 1; done; echo "Warning: wlan0 IP not assigned yet"'
+# If IP still not assigned, assign it manually
+ExecStartPost=/bin/bash -c 'if ! ip addr show wlan0 | grep -q "172.31.250.1"; then ip addr add 172.31.250.1/24 dev wlan0 || true; fi'
+ExecStartPost=/bin/sleep 1
 # Verify interface is up
 ExecStartPost=/bin/bash -c 'ip link show wlan0 | grep -q "state UP" || (echo "Warning: wlan0 may not be UP" && exit 0)'
 
@@ -106,6 +111,20 @@ dhcp-option=3,172.31.250.1
 dhcp-option=6,172.31.250.1
 EOF
 
+# Make dnsmasq wait for wlan0 to have an IP
+mkdir -p /etc/systemd/system/dnsmasq.service.d
+cat > /etc/systemd/system/dnsmasq.service.d/wait-for-wlan0-ip.conf <<'EOF'
+[Unit]
+After=wlan0-up.service
+Requires=wlan0-up.service
+
+[Service]
+# Wait a bit more to ensure wlan0 has IP
+ExecStartPre=/bin/bash -c 'for i in {1..10}; do if ip addr show wlan0 | grep -q "172.31.250.1"; then exit 0; fi; sleep 1; done; echo "Warning: wlan0 IP check timeout"'
+ExecStartPre=/bin/sleep 1
+EOF
+
+systemctl daemon-reload
 systemctl start dnsmasq
 systemctl enable dnsmasq
 
@@ -157,23 +176,37 @@ After=wlan0-up.service
 Requires=wlan0-up.service
 
 [Service]
-# Add a small delay to ensure wlan0 is fully up
-ExecStartPre=/bin/sleep 1
+# Add a delay to ensure wlan0 is fully up and has IP
+ExecStartPre=/bin/bash -c 'for i in {1..10}; do if ip link show wlan0 | grep -q "state UP" && ip addr show wlan0 | grep -q "172.31.250.1"; then exit 0; fi; sleep 1; done; echo "Warning: wlan0 may not be ready"'
+ExecStartPre=/bin/sleep 2
 EOF
 
 systemctl daemon-reload
 systemctl enable hostapd
 systemctl enable wlan0-up.service
 
-# Start wlan0-up first, then hostapd
+# Start wlan0-up first, then restart dnsmasq and hostapd
 systemctl start wlan0-up.service
-sleep 2
-# Verify wlan0 is up before starting hostapd
-if ip link show wlan0 | grep -q "state UP"; then
+sleep 4
+# Verify wlan0 is up and has IP before starting services
+if ip link show wlan0 | grep -q "state UP" && ip addr show wlan0 | grep -q "172.31.250.1"; then
+    echo "✓ wlan0 is UP with IP 172.31.250.1"
+    # Restart dnsmasq to pick up the IP
+    systemctl restart dnsmasq
+    echo "✓ dnsmasq restarted"
     systemctl start hostapd
     echo "✓ hostapd started"
 else
-    echo "⚠️  Warning: wlan0 is not UP, hostapd may fail"
+    echo "⚠️  Warning: wlan0 may not be ready"
+    echo "   Interface state: $(ip link show wlan0 2>/dev/null | grep -o 'state [A-Z]*' || echo 'unknown')"
+    echo "   IP address: $(ip addr show wlan0 2>/dev/null | grep 'inet ' || echo 'none')"
+    # Try to assign IP manually if missing
+    if ! ip addr show wlan0 2>/dev/null | grep -q "172.31.250.1"; then
+        echo "   Attempting to assign IP manually..."
+        ip addr add 172.31.250.1/24 dev wlan0 2>/dev/null || true
+        sleep 1
+    fi
+    systemctl restart dnsmasq || echo "❌ dnsmasq failed to restart"
     systemctl start hostapd || echo "❌ hostapd failed to start"
 fi
 
