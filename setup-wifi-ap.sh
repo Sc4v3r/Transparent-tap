@@ -109,7 +109,12 @@ ht_capab=[HT20][SHORT-GI-20][SHORT-GI-40]
 country_code=US
 EOF
 
-# Enable hostapd service
+# Configure hostapd to use our config file
+cat > /etc/default/hostapd <<EOF
+DAEMON_CONF="/etc/hostapd/hostapd.conf"
+EOF
+
+# Enable hostapd service (persistent across reboots)
 systemctl unmask hostapd
 systemctl enable hostapd
 systemctl start hostapd
@@ -138,11 +143,20 @@ echo "  ✓ Configured for 2.4GHz band (hw_mode=g)"
 echo "  ✓ 802.11n (HT) enabled for better compatibility"
 echo "  ✓ Channel 6 (non-overlapping 2.4GHz channel)"
 echo ""
+echo "AP will start automatically on boot (systemd enabled)"
+echo ""
 echo "To start NAC Tap monitoring:"
 echo "  sudo python3 nac-tap.py"
+echo ""
+echo "Or install as systemd service for auto-start:"
+echo "  sudo bash install-service.sh"
 echo ""
 echo "To check AP status:"
 echo "  systemctl status hostapd"
 echo "  systemctl status dnsmasq"
+echo ""
+echo "To verify AP starts on boot:"
+echo "  systemctl is-enabled hostapd"
+echo "  systemctl is-enabled dnsmasq"
 echo ""
 

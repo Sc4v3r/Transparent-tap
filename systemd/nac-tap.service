@@ -1,21 +1,28 @@
 [Unit]
-Description=NAC Tap - Transparent Bridge Monitor
-After=network.target hostapd.service dnsmasq.service
-Wants=hostapd.service dnsmasq.service
+Description=NAC-Tap - Transparent Network Bridge Monitor
+Documentation=https://github.com/your-repo/nac-tap
+After=network-online.target hostapd.service dnsmasq.service
+Wants=network-online.target
+Requires=hostapd.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/nac-tap
-ExecStart=/usr/bin/python3 /opt/nac-tap/nac-tap.py
+# WorkingDirectory and ExecStart will be auto-updated by install-service.sh
+WorkingDirectory=/path/to/nac-tap
+ExecStart=/usr/bin/python3 /path/to/nac-tap/nac-tap.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=nac-tap
 
-# Security hardening
+# Security settings
 NoNewPrivileges=false
-PrivateTmp=true
+PrivateTmp=false
+
+# Resource limits
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target

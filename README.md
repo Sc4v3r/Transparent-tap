@@ -26,13 +26,16 @@ sudo bash install-dependencies.sh
 # 2. Setup Wi-Fi management AP (required)
 sudo bash setup-wifi-ap.sh
 
-# 3. Start NAC-Tap
-sudo python3 nac-tap.py
+# 3. Install systemd service (auto-start on boot)
+sudo bash install-service.sh
 
-# 4. Connect to Wi-Fi Management AP
+# 4. Start NAC-Tap (or it will start automatically on next reboot)
+sudo systemctl start nac-tap.service
+
+# 5. Connect to Wi-Fi Management AP
 # Connect your laptop/phone to the Wi-Fi network you configured in step 2
 
-# 5. Access web interface
+# 6. Access web interface
 # http://172.31.250.1:8080 (via Wi-Fi) or http://localhost:8080
 ```
 
